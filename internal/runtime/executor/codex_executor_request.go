@@ -84,7 +84,7 @@ func (e *CodexExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Aut
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(req, attrs)
-	return nil
+	return helps.ValidateCodexServiceTierRequest(auth, req)
 }
 
 // HttpRequest injects Codex credentials into the request and executes it.
@@ -96,8 +96,12 @@ func (e *CodexExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
 		ctx = req.Context()
 	}
 	httpReq := req.WithContext(ctx)
-	if err := e.PrepareRequest(httpReq, auth); err != nil {
-		return nil, err
+	errPrepare := e.PrepareRequest(httpReq, auth)
+	// WithContext shares the body reader. Keep the caller's replayable body
+	// synchronized after validation, including a policy rejection before send.
+	req.Body, req.GetBody = httpReq.Body, httpReq.GetBody
+	if errPrepare != nil {
+		return nil, errPrepare
 	}
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
 	return httpClient.Do(httpReq)
@@ -318,7 +322,7 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 	applyCodexCloakingHeaders(r.Header, cfg, auth)
 }
 
-const codexRoutingHintHeader = "X-Codex-Routing-Hint"
+const codexRoutingHintHeader = cliproxyexecutor.CodexRoutingHintHeader
 
 // applyCodexRoutingHint sends the routing hint native Codex attaches to every
 // ChatGPT-backend Responses request: "model=<slug>" plus ";tier=<service_tier>"
