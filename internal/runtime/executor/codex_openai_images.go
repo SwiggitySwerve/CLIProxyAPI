@@ -124,6 +124,9 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 	reporter.SetTranslatedReasoningEffort(body, "codex")
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg, opts.Headers)
 	applyModelHeaderOverrides(httpReq.Header, mainModel)
+	if errTier := helps.ValidateCodexServiceTier(auth, body, httpReq.Header); errTier != nil {
+		return resp, errTier
+	}
 	recordCodexOpenAIImageRequest(ctx, e.cfg, e.Identifier(), auth, url, httpReq.Header.Clone(), body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -227,6 +230,9 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 	reporter.SetTranslatedReasoningEffort(body, "codex")
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg, opts.Headers)
 	applyModelHeaderOverrides(httpReq.Header, mainModel)
+	if errTier := helps.ValidateCodexServiceTier(auth, body, httpReq.Header); errTier != nil {
+		return nil, errTier
+	}
 	recordCodexOpenAIImageRequest(ctx, e.cfg, e.Identifier(), auth, url, httpReq.Header.Clone(), body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -361,6 +367,9 @@ func (e *CodexExecutor) executeDirectOpenAIImage(ctx context.Context, auth *clip
 	httpReq.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
 	applyCodexDirectImageHeaders(httpReq, auth, apiKey, false, e.cfg, opts.Headers)
 	applyModelHeaderOverrides(httpReq.Header, model)
+	if errTier := helps.ValidateCodexServiceTier(auth, body, httpReq.Header); errTier != nil {
+		return resp, errTier
+	}
 	if contentType != "" {
 		httpReq.Header.Set("Content-Type", contentType)
 	}
@@ -428,6 +437,9 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 	httpReq.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
 	applyCodexDirectImageHeaders(httpReq, auth, apiKey, true, e.cfg, opts.Headers)
 	applyModelHeaderOverrides(httpReq.Header, model)
+	if errTier := helps.ValidateCodexServiceTier(auth, body, httpReq.Header); errTier != nil {
+		return nil, errTier
+	}
 	if contentType != "" {
 		httpReq.Header.Set("Content-Type", contentType)
 	}
