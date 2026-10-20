@@ -134,6 +134,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	if errValidate := helps.ValidateCodexHostedImageGenerationDoc(doc, wsHeaders, e.cfg, !useSIWC && !codexAuthUsesAPIKey(auth)); errValidate != nil {
 		return resp, errValidate
 	}
+	if errTier := helps.ValidateCodexServiceTier(auth, body, wsHeaders); errTier != nil {
+		return resp, errTier
+	}
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {

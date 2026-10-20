@@ -742,6 +742,10 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					parent := strings.Clone(steerDoc.Get("previous_response_id").String())
 					steerEventID := strings.Clone(steerDoc.Get("event_id").String())
 					payload = steerDoc.Bytes()
+					if errTier := helps.ValidateCodexServiceTier(auth, payload, initial.wsHeaders); errTier != nil {
+						fail(errTier)
+						return
+					}
 					metadataMu.Lock()
 					settings := responseSettings[parent]
 					metadataMu.Unlock()

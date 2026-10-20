@@ -143,6 +143,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if errValidate := helps.ValidateCodexHostedImageGenerationDoc(doc, httpReq.Header, e.cfg, !useSIWC && !codexAuthUsesAPIKey(auth)); errValidate != nil {
 		return nil, errValidate
 	}
+	if errTier := helps.ValidateCodexServiceTier(auth, upstreamBody, httpReq.Header); errTier != nil {
+		return nil, errTier
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID

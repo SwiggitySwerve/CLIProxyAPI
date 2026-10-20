@@ -972,6 +972,9 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
 	if errValidate := helps.ValidateCodexHostedImageGenerationDoc(doc, wsHeaders, e.cfg, !useSIWC && !codexAuthUsesAPIKey(auth)); errValidate != nil {
 		return nil, errValidate
 	}
+	if errTier := helps.ValidateCodexServiceTier(auth, body, wsHeaders); errTier != nil {
+		return nil, errTier
+	}
 
 	return &codexWebsocketPrepared{
 		from:                 from,

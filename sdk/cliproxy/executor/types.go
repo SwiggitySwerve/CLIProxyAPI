@@ -27,6 +27,9 @@ const ReasoningEffortMetadataKey = "reasoning_effort"
 // ServiceTierMetadataKey stores the client-requested service tier for usage logs.
 const ServiceTierMetadataKey = "service_tier"
 
+// CodexRoutingHintHeader carries the resolved model and optional service tier.
+const CodexRoutingHintHeader = "X-Codex-Routing-Hint"
+
 // GenerateMetadataKey stores whether the client requested actual generation for usage logs.
 // Missing or true means generation is enabled; only an explicit false disables generation.
 const GenerateMetadataKey = "generate"
