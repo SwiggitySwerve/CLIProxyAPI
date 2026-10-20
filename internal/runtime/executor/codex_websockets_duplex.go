@@ -326,6 +326,10 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					}
 					payload = helps.NewPayloadFinalizer(e.cfg, "codex-websockets", thinking.ParseSuffix(req.Model).ModelName, "codex", "", payload, steerReq, opts)(payload)
 					payload, _ = sjson.SetBytes(payload, "type", "response.steer")
+					if errTier := helps.ValidateCodexServiceTier(auth, payload, initial.wsHeaders); errTier != nil {
+						fail(errTier)
+						return
+					}
 					parent := gjson.GetBytes(payload, "previous_response_id").String()
 					metadataMu.Lock()
 					settings := responseSettings[parent]

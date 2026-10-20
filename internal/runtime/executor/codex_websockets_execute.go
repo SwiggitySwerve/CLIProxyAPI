@@ -108,6 +108,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg, nativeRequest, opts.Headers)
 	applyCodexRoutingHint(ctx, wsHeaders, auth, baseModel, body, opts.Headers)
 	applyModelHeaderOverrides(wsHeaders, baseModel)
+	if errTier := helps.ValidateCodexServiceTier(auth, body, wsHeaders); errTier != nil {
+		return resp, errTier
+	}
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
