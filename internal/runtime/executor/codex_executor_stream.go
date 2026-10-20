@@ -109,6 +109,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		alignCodexContentEncoding(request)
 	}
 	prepareHeaders(httpReq)
+	if errTier := helps.ValidateCodexServiceTier(auth, upstreamBody, httpReq.Header); errTier != nil {
+		return nil, errTier
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
