@@ -835,6 +835,9 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg, preserveNativeOutput, opts.Headers)
 	applyCodexRoutingHint(ctx, wsHeaders, auth, baseModel, body, opts.Headers)
 	applyModelHeaderOverrides(wsHeaders, baseModel)
+	if errTier := helps.ValidateCodexServiceTier(auth, body, wsHeaders); errTier != nil {
+		return nil, errTier
+	}
 
 	return &codexWebsocketPrepared{
 		from:                 from,
