@@ -1,6 +1,6 @@
 # Local patch: ultrafast account gate
 
-Base: upstream `v8.0.38` (`0db19025`). Branch: `local/ultrafast-account-gate`.
+Base: upstream `v8.0.39` (`ceb045a1`). Branch: `local/ultrafast-v8.0.39`.
 
 This is a deployment-specific policy patch, not an upstream feature. Upstream
 already forwards the `ultrafast` service tier (#5924). This patch only decides
@@ -33,7 +33,7 @@ turns into a hard ultrafast outage until it is cleared with
 `ultrafastAccountEmail` is a compile-time constant and the tests hard-code the
 same address. Update both when moving the entitlement.
 
-## Verification (v8.0.38, golang:1.26-bookworm)
+## Verification (v8.0.39, golang:1.26-bookworm)
 
     gofmt -l <changed files>   # clean
     go build ./...
