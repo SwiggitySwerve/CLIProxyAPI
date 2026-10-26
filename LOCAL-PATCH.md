@@ -1,6 +1,6 @@
 # Local patch: ultrafast account gate
 
-Base: upstream `v8.0.40` (`d946c4fb`). Branch: `local/ultrafast-v8.0.40`.
+Base: upstream `v8.0.44` (`1f917e77`). Branch: `local/ultrafast-v8.0.44`.
 
 This is a deployment-specific policy patch, not an upstream feature. Upstream
 already forwards the `ultrafast` service tier (#5924). This patch only decides
@@ -33,12 +33,22 @@ turns into a hard ultrafast outage until it is cleared with
 `ultrafastAccountEmail` is a compile-time constant and the tests hard-code the
 same address. Update both when moving the entitlement.
 
-## Verification (v8.0.40, golang:1.26-bookworm)
+## Verification (v8.0.44, golang:1.26-bookworm)
 
     gofmt -l <changed files>   # clean
     go build ./...
     go vet ./sdk/cliproxy/auth/... ./sdk/cliproxy/executor/... ./internal/runtime/executor/...
     go test -count=1 ./sdk/cliproxy/auth/... ./sdk/cliproxy/executor/... ./internal/runtime/executor/...
+
+## Upstream request compression (v8.0.44)
+
+v8.0.44 can zstd-compress Codex request bodies and retries once uncompressed when
+upstream rejects them. Each executor builds headers through `prepareHeaders`, and
+the guard runs right after it on the plaintext JSON that `cacheHelper` returns,
+never on the compressed wire bytes. The retry reuses the same body and the same
+`prepareHeaders`, so it cannot carry a tier the guard did not see.
+`TestUltrafastGuardRejectsCompressedRequestBeforeUpstream` covers this; removing
+the guard makes it fail.
 
 ## Related upstream work
 
