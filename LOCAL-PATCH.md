@@ -50,6 +50,13 @@ never on the compressed wire bytes. The retry reuses the same body and the same
 `TestUltrafastGuardRejectsCompressedRequestBeforeUpstream` covers this; removing
 the guard makes it fail.
 
+## Claude Code startup probe
+
+Claude Code sends `HEAD /api/hello` to `ANTHROPIC_BASE_URL` each time it starts.
+Upstream answers 404 and writes an error log for each probe. `server_routes.go`
+answers it with the `/healthz` handler (HEAD only; GET stays unrouted).
+Test: `TestClaudeCodeHelloProbe`.
+
 ## Related upstream work
 
 - PR #6740 adds `helps/codex_service_tier.go` and downgrades ultrafast for

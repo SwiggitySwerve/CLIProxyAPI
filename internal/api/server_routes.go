@@ -52,6 +52,9 @@ func (s *Server) setupRoutes() {
 	}
 	s.engine.GET("/healthz", healthzHandler)
 	s.engine.HEAD("/healthz", healthzHandler)
+	// Claude Code (a Bun binary) sends HEAD /api/hello to ANTHROPIC_BASE_URL at startup
+	// as a reachability check; answer it like /healthz instead of logging a 404.
+	s.engine.HEAD("/api/hello", healthzHandler)
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
