@@ -726,6 +726,20 @@ func TestHealthz(t *testing.T) {
 	})
 }
 
+func TestClaudeCodeHelloProbe(t *testing.T) {
+	server := newTestServer(t)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, httptest.NewRequest(http.MethodHead, "/api/hello", nil))
+	if rr.Code != http.StatusOK || rr.Body.Len() != 0 {
+		t.Fatalf("HEAD /api/hello = %d with %d body bytes, want 200 and empty", rr.Code, rr.Body.Len())
+	}
+	rr = httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/hello", nil))
+	if rr.Code == http.StatusOK {
+		t.Fatal("GET /api/hello must stay unrouted")
+	}
+}
+
 func TestHealthzAccessLogging(t *testing.T) {
 	server := newTestServer(t)
 	previousHome := home.Current()
