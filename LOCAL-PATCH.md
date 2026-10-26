@@ -45,3 +45,13 @@ same address. Update both when moving the entitlement.
 - PR #6740 adds `helps/codex_service_tier.go` and downgrades ultrafast for
   non-`promax` plans. The guard files here are named `codex_ultrafast_guard*.go`
   to avoid colliding with it.
+
+## Quota reconciler
+
+Not local-only: proposed upstream as router-for-me/CLIProxyAPI#6997. It is opt-in.
+Set `routing.cooldown.quota-reconcile: true` in config.yaml (this deployment does).
+`sdk/cliproxy/auth/quota_reconcile.go`: every 30 seconds, and right after a request
+is rejected by a cooldown, each Codex credential holding a quota cooldown is checked
+against `/backend-api/wham/usage`. It is cleared through `Manager.ResetQuota` only
+when `rate_limit.allowed` is true and `limit_reached` is false. Failed, non-200 or
+incomplete probes keep the cooldown. Disabled credentials are never probed.
