@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -14,10 +15,10 @@ import (
 )
 
 func init() {
-	coreusage.RegisterPlugin(&usageQueuePlugin{})
+	coreusage.RegisterPlugin(&usageQueuePlugin{instanceID: deploymentInstanceID(os.Getenv("CLIPROXY_INSTANCE_ID"))})
 }
 
-type usageQueuePlugin struct{}
+type usageQueuePlugin struct{ instanceID string }
 
 func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Record) {
 	if p == nil {
@@ -145,7 +146,22 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		ResponseHeaders:  record.ResponseHeaders,
 	}
 
+	recordKind := record.RecordKind
+	if recordKind == "" {
+		recordKind = coreusage.RecordUnknown
+	}
+	timingMethod := record.TTFTMethod
+	if timingMethod == "" {
+		timingMethod = coreusage.TimingUnavailable
+	}
 	payload, err := json.Marshal(queuedUsageDetail{
+		InstanceID:           p.instanceID,
+		UsagePresence:        usageDetail.UsageFields.Presence(),
+		UsageFields:          usageDetail.UsageFields,
+		TTFTMethod:           timingMethod,
+		Timing:               record.Timing,
+		RecordKind:           recordKind,
+		ParentExecutionID:    record.ParentExecutionID,
 		requestDetail:        detail,
 		AccountingVersion:    coreusage.TokenAccountingSchemaVersion,
 		TokenBreakdown:       usageDetail.TokenBreakdown,
@@ -179,6 +195,13 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 }
 
 type queuedUsageDetail struct {
+	InstanceID        string                      `json:"instance_id,omitempty"`
+	UsagePresence     string                      `json:"usage_presence"`
+	UsageFields       *coreusage.TokenUsageFields `json:"usage_fields"`
+	TTFTMethod        coreusage.TimingMethod      `json:"ttft_method"`
+	Timing            *coreusage.ExecutionTiming  `json:"timing"`
+	RecordKind        coreusage.RecordKind        `json:"record_kind"`
+	ParentExecutionID string                      `json:"parent_execution_id"`
 	requestDetail
 	AccountingVersion    int                      `json:"accounting_version"`
 	TokenBreakdown       coreusage.TokenBreakdown `json:"token_breakdown"`

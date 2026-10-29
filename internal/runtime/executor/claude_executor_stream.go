@@ -349,7 +349,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 		}()
 		var streamUsage helps.StreamUsageBuffer
-		defer streamUsage.Publish(ctx, reporter)
+		upstreamCompleted := false
+		defer func() { streamUsage.Complete(ctx, reporter, upstreamCompleted) }()
 		emitCancellation := func(cause error) bool {
 			cancelErr := newClaudeOAuthCancellationError(ctx, fp.OAuthCancellation, cause)
 			if cancelErr == nil {
@@ -380,7 +381,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			var event bytes.Buffer
 			var upstreamMessageID string
 			var upstreamStreamErr error
-			upstreamCompleted := false
 			flushEvent := func() bool {
 				if event.Len() == 0 {
 					return true
@@ -459,7 +459,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		var upstreamMessageID string
 		var upstreamStreamErr error
 		var eventBuf bytes.Buffer
-		upstreamCompleted := false
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			eventBuf.Write(line)
