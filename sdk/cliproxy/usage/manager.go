@@ -25,7 +25,11 @@ const AutoServiceTier = "auto"
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
 	// RequestID uniquely identifies this specific model execution instance (UUID v4).
-	RequestID string
+	RequestID         string
+	RecordKind        RecordKind
+	ParentExecutionID string
+	TTFTMethod        TimingMethod
+	Timing            *ExecutionTiming
 	// TraceID identifies the parent inbound HTTP request when available (8-character hex).
 	TraceID string
 	// SelectionID identifies the scheduler selection decision that produced this usage record when available.
@@ -106,6 +110,7 @@ type Failure struct {
 
 // Detail holds the token and structured usage breakdown captured from an upstream response.
 type Detail struct {
+	UsageFields         *TokenUsageFields
 	InputTokens         int64
 	OutputTokens        int64
 	ReasoningTokens     int64

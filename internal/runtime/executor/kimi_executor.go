@@ -372,7 +372,7 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		scanner.Buffer(nil, 1_048_576) // 1MB
 		claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
 		var streamUsage helps.StreamUsageBuffer
-		defer streamUsage.Publish(ctx, reporter)
+		defer streamUsage.Complete(ctx, reporter, false)
 		var param any
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, &param)
 		for scanner.Scan() {
@@ -671,16 +671,16 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 			originalRequest = opts.OriginalRequest
 		}
 		bridge := helps.NewApplyPatchResponsesState(opts.SourceFormat, originalRequest, originalRequest)
+		var streamUsage helps.StreamUsageBuffer
+		defer streamUsage.Complete(ctx, reporter, false)
 		sendFailure := func(errFailure error) {
 			errFailure = statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
-			reporter.PublishFailure(ctx, errFailure)
+			streamUsage.PublishFailure(ctx, reporter, errFailure)
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: errFailure}:
 			case <-ctx.Done():
 			}
 		}
-		var streamUsage helps.StreamUsageBuffer
-		defer streamUsage.Publish(ctx, reporter)
 		var param any
 
 		emitTranslatedLine := func(line []byte) bool {
@@ -720,9 +720,9 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 				dataBytes := bytes.TrimSpace(line[len(dataTag):])
 				eventType := ojson.GetBytesNoCopy(dataBytes, "type").String()
 				if eventType == "response.completed" || eventType == "response.incomplete" || eventType == "response.done" {
-					if usage, ok := helps.ParseCodexUsage(dataBytes); ok && (usage.TotalTokens > 0 || usage.InputTokens > 0) {
+					if usage, ok := helps.ParseCodexUsage(dataBytes); ok && usage.UsageFields.Reported() {
 						streamUsage.Observe(usage, true)
-					} else if usage := helps.ParseOpenAIUsage(dataBytes); usage.TotalTokens > 0 || usage.InputTokens > 0 {
+					} else if usage := helps.ParseOpenAIUsage(dataBytes); usage.UsageFields.Reported() {
 						streamUsage.Observe(usage, true)
 					}
 				}
@@ -730,7 +730,7 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 
 			lines, errTransform := bridge.Stream(bytes.Clone(line))
 			if errTransform != nil {
-				reporter.PublishFailure(ctx, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+				streamUsage.PublishFailure(ctx, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
 			}
 			for _, converted := range lines {
 				if !emitTranslatedLine(converted) {
@@ -744,7 +744,7 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 		}
 		finishEvents, errFinish := bridge.FinishStream()
 		if errFinish != nil {
-			reporter.PublishFailure(ctx, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+			streamUsage.PublishFailure(ctx, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
 		}
 		for _, event := range finishEvents {
 			if !emitTranslatedLine(event) {
@@ -758,7 +758,7 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 
 		if errScan := scanner.Err(); errScan != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx, errScan)
+			streamUsage.PublishFailure(ctx, reporter, errScan)
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 			case <-ctx.Done():

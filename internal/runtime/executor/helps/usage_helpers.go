@@ -63,6 +63,10 @@ type UsageReporter struct {
 	firstPacketSet       bool
 	ttftStart            time.Time
 	ttftSet              bool
+	ttftMethod           usage.TimingMethod
+	upstreamStartedAt    time.Time
+	firstResponseAt      time.Time
+	firstContentAt       time.Time
 	once                 sync.Once
 
 	responseModelMu sync.RWMutex
@@ -463,6 +467,9 @@ func (r *UsageReporter) StartResponseTTFT() {
 	r.ttftMu.Lock()
 	if !r.ttftSet && r.ttftStart.IsZero() {
 		r.ttftStart = time.Now()
+		if r.upstreamStartedAt.IsZero() {
+			r.upstreamStartedAt = r.ttftStart
+		}
 	}
 	r.ttftMu.Unlock()
 }
@@ -521,11 +528,14 @@ func (r *UsageReporter) ObserveTokenEvent(isToken bool) {
 		return
 	}
 	if !r.firstPacketSet {
-		r.firstPacketDuration = time.Since(start)
+		r.firstResponseAt = time.Now()
+		r.firstPacketDuration = r.firstResponseAt.Sub(start)
 		r.firstPacketSet = true
 	}
 	if isToken {
-		r.ttft = time.Since(start)
+		r.firstContentAt = time.Now()
+		r.ttft = r.firstContentAt.Sub(start)
+		r.ttftMethod = usage.TimingSubstantiveContent
 		r.ttftSet = true
 		r.ttftStart = time.Time{}
 	}
@@ -536,17 +546,21 @@ func (r *UsageReporter) MarkFirstResponseByte() {
 		return
 	}
 	r.ttftMu.Lock()
-	if r.ttftSet {
-		r.ttftMu.Unlock()
+	defer r.ttftMu.Unlock()
+	if r.ttftSet || r.ttftStart.IsZero() {
 		return
 	}
-	start := r.ttftStart
+	now := time.Now()
+	if r.firstResponseAt.IsZero() {
+		r.firstResponseAt = now
+	}
+	r.ttft = now.Sub(r.ttftStart)
+	if r.ttft < 0 {
+		r.ttft = 0
+	}
+	r.ttftSet = true
+	r.ttftMethod = usage.TimingFirstByte
 	r.ttftStart = time.Time{}
-	r.ttftMu.Unlock()
-	if start.IsZero() {
-		return
-	}
-	r.setTTFT(time.Since(start))
 }
 
 func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.Detail) (usage.Record, bool) {
@@ -570,6 +584,8 @@ func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.De
 		selection.Additional = true
 		rec.HomeSelection = &selection
 	}
+	rec.RecordKind = usage.RecordSupplementary
+	rec.ParentExecutionID = r.requestID
 	return rec, true
 }
 
@@ -704,7 +720,11 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 	if model == r.model {
 		responseModel = r.ResponseModel()
 	}
+	timing, method, latency, ttft := r.measurementTiming()
 	return usage.Record{
+		RecordKind:           usage.RecordExecution,
+		TTFTMethod:           method,
+		Timing:               timing,
 		RequestID:            r.requestID,
 		TraceID:              r.traceID,
 		SelectionID:          r.selectionID,
@@ -732,8 +752,8 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		Generate:             usage.GenerateFlag(r.generate),
 		Stream:               r.stream,
 		RequestedAt:          r.requestedAt,
-		Latency:              r.latency(),
-		TTFT:                 r.ttftDuration(),
+		Latency:              latency,
+		TTFT:                 ttft,
 		Failed:               failed,
 		Fail:                 fail,
 		Detail:               detail,
@@ -794,22 +814,35 @@ func (r *UsageReporter) latency() time.Duration {
 	return latency
 }
 
-func (r *UsageReporter) setTTFT(ttft time.Duration) {
-	if r == nil {
-		return
+// measurementTiming snapshots observations without changing legacy TTFT semantics.
+func (r *UsageReporter) measurementTiming() (*usage.ExecutionTiming, usage.TimingMethod, time.Duration, time.Duration) {
+	r.ttftMu.RLock()
+	defer r.ttftMu.RUnlock()
+	latency := r.latency()
+	ttft := r.ttftDurationLocked()
+	method := usage.TimingUnavailable
+	if r.ttftSet && r.ttftMethod != "" {
+		method = r.ttftMethod
+	} else if r.firstPacketSet {
+		method = usage.TimingFallbackPacket
 	}
-	if ttft < 0 {
-		ttft = 0
+	if r.requestedAt.IsZero() {
+		return nil, method, latency, ttft
 	}
-	r.ttftMu.Lock()
-	if r.ttftSet {
-		r.ttftMu.Unlock()
-		return
+	offset := func(at time.Time) *int64 {
+		if at.IsZero() {
+			return nil
+		}
+		ms := at.Sub(r.requestedAt).Milliseconds()
+		return &ms
 	}
-	r.ttft = ttft
-	r.ttftSet = true
-	r.ttftStart = time.Time{}
-	r.ttftMu.Unlock()
+	return &usage.ExecutionTiming{
+		Origin:          "execution-start",
+		UpstreamStartMs: offset(r.upstreamStartedAt),
+		FirstResponseMs: offset(r.firstResponseAt),
+		FirstContentMs:  offset(r.firstContentAt),
+		RecordedMs:      latency.Milliseconds(),
+	}, method, latency, ttft
 }
 
 func (r *UsageReporter) ttftDuration() time.Duration {
@@ -818,6 +851,11 @@ func (r *UsageReporter) ttftDuration() time.Duration {
 	}
 	r.ttftMu.RLock()
 	defer r.ttftMu.RUnlock()
+	return r.ttftDurationLocked()
+}
+
+// ttftDurationLocked requires ttftMu to be held.
+func (r *UsageReporter) ttftDurationLocked() time.Duration {
 	if r.ttftSet {
 		return r.ttft
 	}
@@ -1042,7 +1080,7 @@ func (b *StreamUsageBuffer) Observe(detail usage.Detail, ok bool) {
 		return
 	}
 	responseServiceTier := strings.TrimSpace(detail.ResponseServiceTier)
-	if responseServiceTier == "" || hasNonZeroTokenUsage(detail) || hasStructuredUsageDetail(detail) {
+	if responseServiceTier == "" || hasNonZeroTokenUsage(detail) || hasStructuredUsageDetail(detail) || detail.UsageFields.Reported() {
 		preservedTier := b.detail.ResponseServiceTier
 		preservedUpstreamTier := b.detail.UpstreamServiceTier
 		b.detail = detail
@@ -1522,6 +1560,19 @@ func (b *StreamUsageBuffer) Publish(ctx context.Context, reporter *UsageReporter
 	return true
 }
 
+// Complete publishes buffered usage or unknown usage exactly once. A caller with
+// protocol-confirmed completion passes true to preserve terminal-before-cancel
+// semantics; otherwise cancellation is a failure, retaining any partial usage.
+func (b *StreamUsageBuffer) Complete(ctx context.Context, reporter *UsageReporter, completed bool) {
+	if !completed && ctx != nil && ctx.Err() != nil {
+		b.PublishFailure(ctx, reporter, ctx.Err())
+		return
+	}
+	if !b.Publish(ctx, reporter) {
+		reporter.EnsurePublished(ctx)
+	}
+}
+
 // PublishFailure emits the latest observed usage detail together with failure details.
 func (b *StreamUsageBuffer) PublishFailure(ctx context.Context, reporter *UsageReporter, errs ...error) bool {
 	if b == nil || reporter == nil {
@@ -1844,6 +1895,22 @@ func hasOpenAIStyleUsageBucketFields(usageNode ojson.Result) bool {
 		usageNode.Get("reasoning_tokens").Exists()
 }
 
+// observedUsageFields distinguishes numeric zero from absent, null or malformed fields.
+func observedUsageFields(input, output, reasoning, cacheRead, cacheCreation, total ojson.Result) *usage.TokenUsageFields {
+	fields := &usage.TokenUsageFields{
+		InputTokens:         input.Type == ojson.Number,
+		OutputTokens:        output.Type == ojson.Number,
+		ReasoningTokens:     reasoning.Type == ojson.Number,
+		CacheReadTokens:     cacheRead.Type == ojson.Number,
+		CacheCreationTokens: cacheCreation.Type == ojson.Number,
+		TotalTokens:         total.Type == ojson.Number,
+	}
+	if !fields.Reported() {
+		return nil
+	}
+	return fields
+}
+
 func parseOpenAIStyleUsageNode(usageNode ojson.Result) usage.Detail {
 	if !usageNode.Exists() || !usageNode.IsObject() {
 		return usage.Detail{}
@@ -2027,6 +2094,14 @@ func parseOpenAIStyleUsageNode(usageNode ojson.Result) usage.Detail {
 			hasBucketFields = true
 		}
 	}
+	detail.UsageFields = observedUsageFields(
+		firstExistingUsageNode(usageNode, "prompt_tokens", "input_tokens"),
+		firstExistingUsageNode(usageNode, "completion_tokens", "output_tokens"),
+		firstExistingUsageNode(usageNode, "completion_tokens_details.reasoning_tokens", "output_tokens_details.reasoning_tokens", "reasoning_tokens"),
+		firstExistingUsageNode(usageNode, "prompt_tokens_details.cached_tokens", "input_tokens_details.cached_tokens"),
+		firstExistingUsageNode(usageNode, "input_tokens_details.cache_creation_tokens", "input_tokens_details.cache_write_tokens", "prompt_tokens_details.cache_creation_tokens", "prompt_tokens_details.cache_write_tokens"),
+		usageNode.Get("total_tokens"),
+	)
 	scanOutDetails(outputDetails)
 	scanOutDetails(compDetails)
 	if !hasReasoning && flatReasoning.Exists() {
@@ -2795,6 +2870,7 @@ func parseClaudeUsageNode(usageNode ojson.Result) usage.Detail {
 		CacheReadTokens:     cacheReadTokens,
 		CacheCreationTokens: cacheCreationTokens,
 	}
+	detail.UsageFields = observedUsageFields(usageNode.Get("input_tokens"), usageNode.Get("output_tokens"), reasoningNode, usageNode.Get("cache_read_input_tokens"), usageNode.Get("cache_creation_input_tokens"), ojson.Result{})
 	// Anthropic reports the speed a response was served and billed at in
 	// usage.speed ("fast" or "standard"): fast mode costs more, and a
 	// fast request on a model without it runs, and is billed, at standard.

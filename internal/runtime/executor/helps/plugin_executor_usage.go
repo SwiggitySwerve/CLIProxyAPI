@@ -163,6 +163,7 @@ func ObserveMergedStreamUsage(buffer *StreamUsageBuffer, update usage.Detail) {
 // MergeStreamUsageDetail merges existing stream usage with a newer update.
 func MergeStreamUsageDetail(existing, update usage.Detail) usage.Detail {
 	merged := update
+	merged.UsageFields = usage.MergeTokenUsageFields(existing.UsageFields, update.UsageFields)
 	if merged.InputTokens == 0 && existing.InputTokens > 0 {
 		merged.InputTokens = existing.InputTokens
 	}
