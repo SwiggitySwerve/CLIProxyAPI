@@ -12,8 +12,10 @@ import (
 // resets soonest, so quota that is about to expire is spent first.
 //
 // It considers the same candidates as FillFirstSelector and ranks them:
-//  1. no quota observation yet, or the observed reset time has passed: tried first
-//     so one request refreshes the snapshot;
+//  1. no quota observation yet, or the observed reset time has passed: tried first.
+//     A response without quota headers leaves the old snapshot in place, so such a
+//     credential keeps this rank on every pick until a response with headers arrives
+//     (meanwhile the strategy keeps choosing it, like fill-first);
 //  2. a known future reset time: soonest first;
 //  3. observed but without a usable reset time: last.
 //
@@ -73,7 +75,8 @@ func soonestResetRank(auth *Auth, now time.Time) (int, time.Time) {
 // Claude: Anthropic-Ratelimit-Unified-7d-Reset, else Anthropic-Ratelimit-Unified-Reset
 // (epoch seconds). Codex: the secondary window, else the primary window, each
 // X-Codex-<Window>-Reset-At (epoch seconds) or else X-Codex-<Window>-Reset-After-Seconds
-// (relative to observedAt). Unparsable, non-positive or out-of-horizon values are skipped.
+// (relative to observedAt; zero means the window just reset). Unparsable, negative,
+// zero epoch or out-of-horizon values are skipped.
 func quotaWindowResetAt(signals map[string]string, observedAt time.Time) (time.Time, bool) {
 	if len(signals) == 0 || observedAt.IsZero() {
 		return time.Time{}, false
@@ -87,7 +90,7 @@ func quotaWindowResetAt(signals map[string]string, observedAt time.Time) (time.T
 		if resetAt, ok := epochQuotaReset(signals[window+"Reset-At"], observedAt); ok {
 			return resetAt, true
 		}
-		if seconds, ok := positiveQuotaInt(signals[window+"Reset-After-Seconds"]); ok && seconds <= int64(maxQuotaResetHorizon/time.Second) {
+		if seconds, ok := parseQuotaInt(signals[window+"Reset-After-Seconds"], 0); ok && seconds <= int64(maxQuotaResetHorizon/time.Second) {
 			return observedAt.Add(time.Duration(seconds) * time.Second), true
 		}
 	}
@@ -95,7 +98,7 @@ func quotaWindowResetAt(signals map[string]string, observedAt time.Time) (time.T
 }
 
 func epochQuotaReset(value string, observedAt time.Time) (time.Time, bool) {
-	seconds, ok := positiveQuotaInt(value)
+	seconds, ok := parseQuotaInt(value, 1)
 	if !ok {
 		return time.Time{}, false
 	}
@@ -106,12 +109,12 @@ func epochQuotaReset(value string, observedAt time.Time) (time.Time, bool) {
 	return resetAt, true
 }
 
-func positiveQuotaInt(value string) (int64, bool) {
+func parseQuotaInt(value string, min int64) (int64, bool) {
 	if value == "" {
 		return 0, false
 	}
 	parsed, err := strconv.ParseInt(value, 10, 64)
-	if err != nil || parsed <= 0 {
+	if err != nil || parsed < min {
 		return 0, false
 	}
 	return parsed, true
