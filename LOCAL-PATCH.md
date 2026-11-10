@@ -83,14 +83,16 @@ credential whose longest quota window resets soonest, so quota that is about to
 expire is spent first. Lowest rank wins; ties keep ID order:
 
 1. Not observed since start (`Quota.ObservedAt` zero), or the observed reset has
-   passed: tried first, so one request refreshes its headers.
+   passed: tried first. A response without quota headers leaves the old snapshot in
+   place, so such a credential keeps this rank on every pick until a response with
+   headers arrives (meanwhile the strategy keeps choosing it, like fill-first).
 2. Known future reset: soonest first.
 3. Observed but no usable reset time: last.
 
 Reset time: Claude `Anthropic-Ratelimit-Unified-7d-Reset`, else
 `Anthropic-Ratelimit-Unified-Reset`. Codex: the secondary window, else the primary,
 using `X-Codex-<Window>-Reset-At`, else `X-Codex-<Window>-Reset-After-Seconds` added to
-`ObservedAt`. Other providers have no reset time and fall back to fill-first order.
+`ObservedAt` (zero means the window just reset). Other providers have no reset time and fall back to fill-first order.
 It only reads the quota headers the hub already stores after each response. It makes
 no extra upstream calls and keeps no state.
 Tests: `selector_soonest_reset_test.go`, `service_config_soonest_reset_test.go`,

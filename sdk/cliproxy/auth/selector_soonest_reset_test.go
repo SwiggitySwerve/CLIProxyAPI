@@ -116,8 +116,22 @@ func TestQuotaWindowResetAt(t *testing.T) {
 			signals: map[string]string{"X-Codex-Secondary-Reset-After-Seconds": "99999999"},
 		},
 		{
-			name:    "codex zero reset-after-seconds is rejected",
+			name:    "codex zero reset-after-seconds is a reset at the observation",
 			signals: map[string]string{"X-Codex-Primary-Reset-After-Seconds": "0"},
+			want:    1787279282,
+		},
+		{
+			name:    "codex zero secondary reset-after-seconds wins over the primary window",
+			signals: map[string]string{"X-Codex-Secondary-Reset-After-Seconds": "0", "X-Codex-Primary-Reset-At": "1787290000"},
+			want:    1787279282,
+		},
+		{
+			name:    "codex negative reset-after-seconds is rejected",
+			signals: map[string]string{"X-Codex-Primary-Reset-After-Seconds": "-1"},
+		},
+		{
+			name:    "codex zero reset-at is rejected",
+			signals: map[string]string{"X-Codex-Primary-Reset-At": "0"},
 		},
 		{
 			name: "codex additional and code-review windows are ignored",
@@ -264,6 +278,14 @@ func TestSoonestResetSelectorPickRanking(t *testing.T) {
 			want: "b",
 		},
 		{
+			name: "codex zero reset-after-seconds is tried before a known future reset",
+			auths: []*Auth{
+				soonestResetTestAuth("a", observed, claude7dReset(now.Add(time.Hour))),
+				{ID: "b", Provider: "codex", Quota: QuotaState{ObservedAt: observed, Signals: map[string]string{"X-Codex-Secondary-Reset-After-Seconds": "0"}}},
+			},
+			want: "b",
+		},
+		{
 			name:     "providers without quota observation behave like fill-first",
 			provider: "gemini",
 			auths: []*Auth{
@@ -288,6 +310,30 @@ func TestSoonestResetSelectorPickRanking(t *testing.T) {
 				t.Fatalf("Pick() = %v, want %s", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestSoonestResetSelectorKeepsPickingPassedResetUntilRefreshed documents that the
+// ranking is stateless: a credential whose stored reset has passed keeps the first
+// rank on every pick until its snapshot is replaced.
+func TestSoonestResetSelectorKeepsPickingPassedResetUntilRefreshed(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	auths := []*Auth{
+		soonestResetTestAuth("a", now.Add(-10*time.Minute), claude7dReset(now.Add(time.Hour))),
+		soonestResetTestAuth("b", now.Add(-48*time.Hour), claude7dReset(now.Add(-time.Hour))),
+		soonestResetTestAuth("c", now.Add(-10*time.Minute), claude7dReset(now.Add(2*time.Hour))),
+	}
+	selector := &SoonestResetSelector{}
+	for i := 0; i < 5; i++ {
+		got, err := selector.Pick(context.Background(), "claude", "", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		if got.ID != "b" {
+			t.Fatalf("Pick() #%d = %s, want b while its snapshot is not refreshed", i, got.ID)
+		}
 	}
 }
 
