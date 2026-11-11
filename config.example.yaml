@@ -258,9 +258,27 @@ routing:
     # Default is false; when false, cooldown status is kept in memory only.
     save-cooldown-status: false
 
-    # When true, check Codex credentials that hold a quota cooldown against the provider usage report
-    # (every 30s, and when a request is rejected by a cooldown) and clear the cooldown once the
-    # provider says usage is allowed again. Sends one read-only usage request per cooled-down credential.
+    # Recheck credentials that hold a quota cooldown against the provider and, in clear mode, clear the
+    # cooldown once the provider says usage is allowed again. Accepts a bool or a per-provider map.
+    #   true  = codex in clear mode (checked every pass, at least 10s apart, and when a request is
+    #           rejected by a cooldown; sends one read-only usage request per cooled-down credential)
+    #   false = off
+    # Map form, one entry per provider (only providers with a recheck adapter are checked; today: codex):
+    #   mode: off | observe | clear. observe logs the verdict (provider, credential id, verdict, signals)
+    #     and never clears; clear also clears the cooldown. Required.
+    #   interval: gap between rechecks of a cooled credential (default codex 10s, others 30m; minimum 10s).
+    #   near-reset-interval: gap used within near-reset-window before a known reset (default codex 10s, others 5m).
+    #   near-reset-window: how long before a known reset the near interval applies (default codex 0, others 1h).
+    # After the loop clears a cooldown, a quota 429 within 10 minutes doubles that credential's
+    # interval (up to 6h) until its known reset passes.
+    # When every candidate for a request is cooled, one recheck round runs before the 429 (at most
+    # once per credential per 60s): claude sends the request itself on a cooled credential and a 200
+    # with an allowed unified status clears the cooldown in clear mode (observe serves it but keeps
+    # the cooldown); codex asks its usage endpoint and then selects again.
+    # Example:
+    #   quota-reconcile:
+    #     codex: {mode: clear}
+    #     claude: {mode: observe, interval: 30m, near-reset-interval: 5m, near-reset-window: 1h}
     quota-reconcile: false
 
     # Cooldown duration in seconds for transient upstream errors (408/500/502/503/504/520-526).
