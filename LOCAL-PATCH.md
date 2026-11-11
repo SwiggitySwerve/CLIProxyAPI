@@ -77,6 +77,11 @@ is rejected by a cooldown, each Codex credential holding a quota cooldown is che
 against `/backend-api/wham/usage`. It is cleared through `Manager.ResetQuota` only
 when `rate_limit.allowed` is true and `limit_reached` is false. Failed, non-200 or
 incomplete probes keep the cooldown. Disabled credentials are never probed.
+Providers plug in through `QuotaRecheckAdapter` (`quota_recheck.go`, registered per
+provider with `Manager.RegisterQuotaRecheckAdapter`; only Codex has one). A cooldown is
+cleared only if it is still the one the probe observed (recover time, credential
+version and epoch unchanged), so a newer cooldown set mid-probe survives.
+Tests: `quota_reconcile_test.go`, `quota_recheck_test.go`.
 
 ## Soonest-reset routing
 

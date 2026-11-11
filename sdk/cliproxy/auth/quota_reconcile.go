@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -31,6 +32,7 @@ type quotaReconciler struct {
 	started   atomic.Bool
 	wake      atomic.Pointer[chan struct{}]
 	lastProbe sync.Map // auth ID -> time.Time
+	adapters  sync.Map // lowercase provider -> QuotaRecheckAdapter
 }
 
 // StartQuotaReconciler launches a loop that, when quota-reconcile is enabled, probes Codex credentials sitting in
@@ -97,7 +99,11 @@ func (m *Manager) reconcileQuotaCooldowns(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") || !authHasQuotaCooldown(auth) {
+		if auth == nil || !authHasQuotaCooldown(auth) {
+			continue
+		}
+		adapter := m.quotaRecheckAdapter(auth.Provider)
+		if adapter == nil {
 			continue
 		}
 		now := time.Now()
@@ -106,15 +112,25 @@ func (m *Manager) reconcileQuotaCooldowns(ctx context.Context) {
 		}
 		m.quotaReconcile.lastProbe.Store(auth.ID, now)
 
-		allowed, err := m.probeCodexUsageAllowed(ctx, auth)
+		// Capture the cooldown the probe is about to judge so a newer one set
+		// while the probe is in flight is not cleared by a stale verdict.
+		identity := newQuotaCooldownIdentity(auth)
+		verdict, err := m.quotaRecheckVerdict(ctx, adapter, auth)
 		if err != nil {
 			log.Debugf("quota reconcile: probe failed for %s: %v", auth.ID, err)
 			continue
 		}
-		if !allowed {
+		if verdict.State != QuotaVerdictAllowed {
 			continue
 		}
-		if _, _, errReset := m.ResetQuota(ctx, auth.ID); errReset != nil {
+		_, _, errReset := m.resetQuota(ctx, auth.ID, func(current *Auth) bool {
+			return newQuotaCooldownIdentity(current) == identity
+		})
+		if errors.Is(errReset, errQuotaCooldownChanged) {
+			log.Infof("quota reconcile: cooldown for %s changed during the probe, keeping it", auth.ID)
+			continue
+		}
+		if errReset != nil {
 			log.Warnf("quota reconcile: reset failed for %s: %v", auth.ID, errReset)
 			continue
 		}
@@ -122,38 +138,56 @@ func (m *Manager) reconcileQuotaCooldowns(ctx context.Context) {
 	}
 }
 
-// probeCodexUsageAllowed reports whether the provider says the credential may
-// make requests right now. An unreadable or partial answer is an error so the
-// existing cooldown is kept.
-func (m *Manager) probeCodexUsageAllowed(ctx context.Context, auth *Auth) (bool, error) {
+func (m *Manager) quotaRecheckVerdict(ctx context.Context, adapter QuotaRecheckAdapter, auth *Auth) (QuotaVerdict, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, quotaProbeTimeout)
 	defer cancel()
+	return adapter.Verdict(probeCtx, m, auth)
+}
 
-	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, codexUsageProbeURL, nil)
+// codexQuotaRecheckAdapter checks Codex credentials against the usage report.
+type codexQuotaRecheckAdapter struct{}
+
+func (codexQuotaRecheckAdapter) Provider() string { return "codex" }
+
+// UsageSnapshot returns the quota snapshot already stored from the last
+// response; it makes no upstream call.
+func (codexQuotaRecheckAdapter) UsageSnapshot(_ context.Context, _ QuotaRecheckHost, auth *Auth) (QuotaUsageSnapshot, error) {
+	return QuotaUsageSnapshot{Signals: auth.Quota.Clone().Signals, ObservedAt: auth.Quota.ObservedAt}, nil
+}
+
+// Verdict reports whether the provider says the credential may make requests
+// right now. An unreadable or partial answer is an error so the existing
+// cooldown is kept.
+func (codexQuotaRecheckAdapter) Verdict(ctx context.Context, host QuotaRecheckHost, auth *Auth) (QuotaVerdict, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, codexUsageProbeURL, nil)
 	if err != nil {
-		return false, err
+		return QuotaVerdict{}, err
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "codex_cli_rs/0.164.0")
 	if accountID, _ := auth.Metadata["account_id"].(string); strings.TrimSpace(accountID) != "" {
 		req.Header.Set("Chatgpt-Account-Id", strings.TrimSpace(accountID))
 	}
-	resp, err := m.HttpRequest(probeCtx, auth, req)
+	resp, err := host.HttpRequest(ctx, auth, req)
 	if err != nil {
-		return false, err
+		return QuotaVerdict{}, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, quotaProbeMaxBody))
 	if err != nil {
-		return false, err
+		return QuotaVerdict{}, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("usage probe returned HTTP %d", resp.StatusCode)
+		return QuotaVerdict{}, fmt.Errorf("usage probe returned HTTP %d", resp.StatusCode)
 	}
 	allowed := ojson.GetBytes(body, "rate_limit.allowed")
 	limitReached := ojson.GetBytes(body, "rate_limit.limit_reached")
 	if !allowed.Exists() || !limitReached.Exists() {
-		return false, fmt.Errorf("usage probe response has no rate_limit state")
+		return QuotaVerdict{}, fmt.Errorf("usage probe response has no rate_limit state")
 	}
-	return allowed.Bool() && !limitReached.Bool(), nil
+	verdict := QuotaVerdict{State: QuotaVerdictLimited, ObservedAt: time.Now(), Source: "wham-usage"}
+	if allowed.Bool() && !limitReached.Bool() {
+		verdict.State = QuotaVerdictAllowed
+	}
+	return verdict, nil
 }
