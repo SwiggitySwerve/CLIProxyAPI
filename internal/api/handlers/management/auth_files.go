@@ -132,7 +132,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 	if pagination.enabled {
 		matching := make([]*coreauth.Auth, 0, len(auths))
 		for _, auth := range auths {
-			if !matchesAuthFileLookup(auth, nameFilter, authIndexFilter) || !isAuthFileListable(auth) {
+			if !matchesAuthFileLookup(auth, nameFilter, authIndexFilter) || !isAuthFileListable(auth, quota.v8) {
 				continue
 			}
 			matching = append(matching, auth)
@@ -264,7 +264,7 @@ func compareAuthFileListOrder(left, right *coreauth.Auth) int {
 	return strings.Compare(leftIndex, rightIndex)
 }
 
-func isAuthFileListable(auth *coreauth.Auth) bool {
+func isAuthFileListable(auth *coreauth.Auth, includeConfigKeys bool) bool {
 	if auth == nil {
 		return false
 	}
@@ -274,7 +274,7 @@ func isAuthFileListable(auth *coreauth.Auth) bool {
 	}
 	path := strings.TrimSpace(authAttribute(auth, "path"))
 	if path == "" {
-		return runtimeOnly
+		return runtimeOnly || (includeConfigKeys && coreauth.IsConfigAPIKeyAuth(auth))
 	}
 	if _, errStat := os.Stat(path); os.IsNotExist(errStat) && !runtimeOnly &&
 		(auth.Disabled || auth.Status == coreauth.StatusDisabled || strings.EqualFold(strings.TrimSpace(auth.StatusMessage), "removed via management api")) {
@@ -661,7 +661,9 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 		return nil
 	}
 	path := strings.TrimSpace(authAttribute(auth, "path"))
-	if path == "" && !runtimeOnly {
+	// v8 also lists API keys defined in config; v0 keeps its file-only shape.
+	configKey := quota.v8 && coreauth.IsConfigAPIKeyAuth(auth)
+	if path == "" && !runtimeOnly && !configKey {
 		return nil
 	}
 	name := strings.TrimSpace(auth.FileName)
@@ -715,8 +717,16 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 		if accountType != "" {
 			entry["account_type"] = accountType
 		}
-		if account != "" {
+		// For API-key credentials AccountInfo returns the raw key; never list it for config keys.
+		if account != "" && !configKey {
 			entry["account"] = account
+		}
+	}
+	if quota.v8 {
+		entry["kind"] = "auth_file"
+		if configKey {
+			entry["kind"] = "config_api_key"
+			entry["source"] = "config"
 		}
 	}
 	if !auth.CreatedAt.IsZero() {
