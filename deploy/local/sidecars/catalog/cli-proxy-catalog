@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""Relabel CLIProxyAPI's Codex model catalog so proxy models are recognisable.
+
+Codex reads model names from `model_catalog_url`. This forwards GET /v1/models
+(with the caller's own Authorization header and query string) to the proxy and
+rewrites only display names:
+  "GPT 6.0 Astra"            -> "GPT 6.0 Astra · CLIP"
+  "GPT 6.0 Astra" (…-fast)   -> "GPT 6.0 Astra Fast · CLIP"
+The -fast models exist because the Codex app hides its own Fast toggle for custom providers.
+Slugs, metadata and routing are untouched; requests themselves still go to the
+proxy on :8317.
+
+It also serves GET /registry/models.json, the proxy's model registry source
+(config `models.catalog`): the live router-for-me/models catalog, any entry
+from ~/.config/cli-proxy-catalog/extra-models.json whose id upstream doesn't list
+yet, and listed GPT models from the ultrafast account that upstream does not have
+yet. Account metadata refreshes context length and Codex speed tiers on models
+already listed. A failed account fetch keeps the upstream catalog. If the
+upstream fetch fails it returns 502 and the proxy keeps its last valid catalog. Serves :8318 on all interfaces (LAN + tailnet subnet route);
+without a valid client key the proxy itself refuses the upstream call.
+"""
+import json
+import urllib.error
+import urllib.request
+from pathlib import Path
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+PROXY = "http://127.0.0.1:8317"
+SUFFIX = " · CLIP"
+FORWARD_HEADERS = ("Authorization", "User-Agent", "originator", "Accept", "version")
+REGISTRY_UPSTREAM = "https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/models.json"
+EXTRA_MODELS = Path.home() / ".config/cli-proxy-catalog/extra-models.json"
+CODEX_REGISTRY_UPSTREAM = "https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/codex_client_models.json"
+ULTRAFAST_AUTH = Path.home() / ".local/share/cli-proxy-api/auth/<codex-auth-file-name>.json"  # scrubbed placeholder
+
+
+def load_account_models() -> list:
+    """Live Codex catalog for the ultrafast account. Empty when that auth is unusable."""
+    try:
+        auth = json.loads(ULTRAFAST_AUTH.read_text())
+    except (OSError, ValueError):
+        return []
+    if auth.get("email") != "<account-email>" or auth.get("disabled"):  # email scrubbed placeholder
+        return []
+    if not auth.get("access_token") or not auth.get("account_id"):
+        return []
+    req = urllib.request.Request(
+        "https://chatgpt.com/backend-api/codex/models?client_version=0.162.1",
+        headers={
+            "Authorization": "Bearer " + auth["access_token"],
+            "Chatgpt-Account-Id": auth["account_id"],
+            "User-Agent": "codex_cli_rs/0.162.1 (Linux; x86_64)",
+            "Originator": "codex_cli_rs",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            models = json.load(resp).get("models") or []
+    except (OSError, ValueError, urllib.error.URLError):
+        return []
+    return [model for model in models if isinstance(model, dict) and model.get("slug")]
+
+
+def current_gpt_models(account_models: list) -> list:
+    """Listed GPT models. Speed stays on the base model; -fast ids are not separate models."""
+    current = []
+    for model in account_models:
+        slug = str(model.get("slug") or "")
+        if not slug.startswith("gpt-") or slug.endswith("-fast"):
+            continue
+        if model.get("visibility") not in (None, "list"):
+            continue
+        current.append(model)
+    return current
+
+
+def openai_registry_entry(account_model: dict) -> dict:
+    levels = [
+        level.get("effort")
+        for level in account_model.get("supported_reasoning_levels") or []
+        if isinstance(level, dict) and level.get("effort")
+    ]
+    context = account_model.get("context_window") or account_model.get("max_context_window") or 272000
+    return {
+        "id": account_model["slug"],
+        "object": "model",
+        "owned_by": "openai",
+        "type": "openai",
+        "display_name": account_model.get("display_name") or account_model["slug"],
+        "description": account_model.get("description") or "",
+        "context_length": context,
+        "max_completion_tokens": 128000,
+        "supported_parameters": ["tools"],
+        "thinking": {"levels": levels or ["low", "medium", "high"]},
+        "supportedInputModalities": account_model.get("input_modalities") or ["text", "image"],
+        "supportedOutputModalities": ["text"],
+        "native_capabilities": {"web_search": bool(account_model.get("supports_search_tool", True))},
+    }
+
+
+def openai_model_list(catalog: dict) -> list:
+    for models in catalog.values():
+        if isinstance(models, list) and any(
+            isinstance(model, dict) and str(model.get("id") or "").startswith("gpt-") for model in models
+        ):
+            return models
+    return catalog.setdefault("openai", [])
+
+
+def apply_current_gpt_models(catalog: dict, account_models: list) -> None:
+    listed = openai_model_list(catalog)
+    by_id = {model.get("id"): model for model in listed if isinstance(model, dict)}
+    for account_model in current_gpt_models(account_models):
+        entry = by_id.get(account_model["slug"])
+        if entry is None:
+            entry = openai_registry_entry(account_model)
+            listed.append(entry)
+            by_id[account_model["slug"]] = entry
+            continue
+        context = account_model.get("context_window")
+        if isinstance(context, int) and context > int(entry.get("context_length") or 0):
+            entry["context_length"] = context
+
+
+def merged_registry() -> bytes:
+    with urllib.request.urlopen(REGISTRY_UPSTREAM, timeout=30) as resp:
+        catalog = json.load(resp)
+    try:
+        extras = json.loads(EXTRA_MODELS.read_text())
+    except FileNotFoundError:
+        extras = {}
+    for provider, models in extras.items():
+        listed = catalog.setdefault(provider, [])
+        known = {m.get("id") for m in listed if isinstance(m, dict)}
+        listed.extend(m for m in models if m.get("id") not in known)
+    apply_current_gpt_models(catalog, load_account_models())
+    return json.dumps(catalog).encode()
+
+
+def merged_codex_registry() -> bytes:
+    """Publish upstream Codex models plus any newer listed GPT model from the account."""
+    with urllib.request.urlopen(CODEX_REGISTRY_UPSTREAM, timeout=30) as resp:
+        catalog = json.load(resp)
+    account_models = {model["slug"]: model for model in load_account_models()}
+    known = set()
+    for model in catalog["models"]:
+        slug = model.get("slug")
+        known.add(slug)
+        account_model = account_models.get(slug)
+        if account_model is None:
+            continue
+        for key in ("service_tiers", "additional_speed_tiers", "context_window", "max_context_window"):
+            if key in account_model:
+                model[key] = account_model[key]
+    for account_model in current_gpt_models(list(account_models.values())):
+        if account_model["slug"] in known:
+            continue
+        catalog["models"].append(account_model)
+        known.add(account_model["slug"])
+    return json.dumps(catalog).encode()
+
+
+def relabel(entry: dict) -> dict:
+    slug = entry.get("slug") or entry.get("id") or ""
+    for key in ("display_name", "name"):
+        name = entry.get(key)
+        if not isinstance(name, str) or name.endswith(SUFFIX):
+            continue
+        if slug.endswith("-fast") and "fast" not in name.lower():
+            name += " Fast"
+        entry[key] = name + SUFFIX
+    if "display_name" not in entry and slug:
+        entry["display_name"] = slug + SUFFIX
+    return entry
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path in ("/registry/models.json", "/registry/codex-client-models.json"):
+            try:
+                body = merged_registry() if self.path == "/registry/models.json" else merged_codex_registry()
+            except Exception as err:  # upstream unreachable or bad extras: proxy keeps last catalog
+                self.send_error(502, str(err))
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if not self.path.startswith("/v1/models"):
+            self.send_error(404)
+            return
+        req = urllib.request.Request(PROXY + self.path)
+        for h in FORWARD_HEADERS:
+            if self.headers.get(h):
+                req.add_header(h, self.headers[h])
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                status, ctype, body = resp.status, resp.headers.get("Content-Type", ""), resp.read()
+        except urllib.error.HTTPError as err:
+            status, ctype, body = err.code, err.headers.get("Content-Type", ""), err.read()
+        except Exception as err:  # proxy down
+            self.send_error(502, str(err))
+            return
+        if status == 200 and "json" in ctype:
+            try:
+                data = json.loads(body)
+                for key in ("models", "data"):
+                    if isinstance(data.get(key), list):
+                        data[key] = [relabel(m) if isinstance(m, dict) else m for m in data[key]]
+                body = json.dumps(data).encode()
+            except ValueError:
+                pass
+        self.send_response(status)
+        self.send_header("Content-Type", ctype or "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+if __name__ == "__main__":
+    ThreadingHTTPServer(("0.0.0.0", 8318), Handler).serve_forever()
