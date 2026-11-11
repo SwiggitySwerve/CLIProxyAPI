@@ -31,7 +31,7 @@ If the ultrafast account is cooled down or unavailable, ultrafast has no
 eligible credential and fails with 403/503 instead of falling back. This is
 intentional (fail closed). A stale `usage_limit_reached` cooldown therefore
 turns into a hard ultrafast outage until it is cleared with
-`POST /v0/management/reset-quota` or a restart.
+`POST /v8/management/routing/cooldown/reset` (body `{"auth_index": "..."}`) or a restart.
 
 ## Changing the account
 
