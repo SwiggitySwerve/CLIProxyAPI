@@ -1,5 +1,5 @@
 [Unit]
-Description=Re-rank CLIProxyAPI accounts by soonest weekly quota reset
+Description=Observe CLIProxyAPI account quotas (read-only)
 After=cli-proxy-api.service
 
 [Service]
