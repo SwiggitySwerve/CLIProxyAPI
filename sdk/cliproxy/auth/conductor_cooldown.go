@@ -984,6 +984,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 		modelState := existingModelState(auth, modelKey)
+		cooldownCredentialLevel := result.CredentialScope || modelKey == ""
+		prevCooldownDeadline := cooldownDeadline(auth, modelState, cooldownCredentialLevel)
 		auth.recordRecentRequest(now, result.Success)
 		if result.Success {
 			auth.Success++
@@ -1474,6 +1476,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				}
 			}
 			scheduleUnauthorizedRefresh = true
+		}
+
+		if !result.Success && !wasTerminalUnauthorized && statusCodeFromResult(result.Error) == http.StatusTooManyRequests {
+			if deadline := cooldownDeadline(auth, modelState, cooldownCredentialLevel); deadline.After(now) && deadline.After(prevCooldownDeadline) {
+				logUpstreamCooldownEvidence(ctx, auth, result.Provider, result.Model, cooldownCredentialLevel, modelState, deadline, result.RetryAfter, responseHeaders)
+			}
 		}
 
 		auth.Generation++
