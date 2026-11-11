@@ -39,6 +39,10 @@ type CooldownStateRecord struct {
 	CooldownSignals map[string]string `json:"cooldown_signals,omitempty"`
 	// IndependentCooldownSignals persists CooldownSignals for IndependentState.
 	IndependentCooldownSignals map[string]string `json:"independent_cooldown_signals,omitempty"`
+	// Observation persists the last passive quota snapshot for this pair. A
+	// record may carry only an observation; such records have a zero
+	// NextRetryAfter and never restore a cooldown.
+	Observation *QuotaObservationRecord `json:"observation,omitempty"`
 }
 
 // CooldownStateStore persists runtime cooldown state independently from auth tokens.

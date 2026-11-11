@@ -336,6 +336,13 @@ func (m *Manager) RestoreCooldownStates(ctx context.Context) error {
 
 	m.mu.Lock()
 	for _, record := range records {
+		if m.restoreQuotaObservationLocked(record) {
+			if auth := m.auths[strings.TrimSpace(record.AuthID)]; auth != nil {
+				snapshotsByID[auth.ID] = auth.Clone()
+			}
+		}
+	}
+	for _, record := range records {
 		if strings.TrimSpace(record.Model) == "" {
 			authLevelRecords = append(authLevelRecords, record)
 			continue
@@ -696,6 +703,7 @@ func (m *Manager) persistCooldownStatesToLocked(ctx context.Context, store Coold
 		logEntryWithRequestID(ctx).Warnf("failed to persist cooldown state: %v", errSave)
 		return false
 	}
+	m.noteQuotaObservationsSaved()
 	return ctx.Err() == nil
 }
 
@@ -705,7 +713,7 @@ func (m *Manager) cooldownStateRecordsSnapshot() []CooldownStateRecord {
 
 	m.mu.RLock()
 	for _, auth := range m.auths {
-		records = append(records, m.cooldownStateRecordsForAuthLocked(auth, now)...)
+		records = append(records, attachQuotaObservationsLocked(auth, m.cooldownStateRecordsForAuthLocked(auth, now))...)
 	}
 	m.mu.RUnlock()
 
@@ -939,6 +947,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 	var authSnapshot *Auth
 	cooldownStateChanged := false
+	observationChanged := false
 	scheduleUnauthorizedRefresh := false
 	now := time.Now()
 	// A 401 condemns the access token, except one a -and-cooldown rule matched: that only cools the credential.
@@ -1480,10 +1489,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		auth.UpdatedAt = now
 
 		if !result.SkipQuotaObservation {
-			auth.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, now)
+			observationChanged = auth.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, now)
 			if modelState != nil {
-				modelState.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, now)
+				observationChanged = modelState.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, now) || observationChanged
 			}
+			// Observations are persisted only where cooldown state is (never under Home).
+			observationChanged = observationChanged && trackCooldownState
 		}
 
 		_ = m.persistLocked(ctx, auth)
@@ -1508,6 +1519,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	}
 	if authSnapshot != nil && cooldownStateChanged {
 		m.persistCooldownStates(context.Background())
+	} else if authSnapshot != nil && observationChanged {
+		m.observeQuotaChange()
 	}
 	// A newly exhausted Devin credential must join the refresh schedule so
 	// quota revalidation can detect early restoration (issue #6690).

@@ -87,8 +87,9 @@ It works bare and as the `routing.session-affinity` fallback.
 credential whose longest quota window resets soonest, so quota that is about to
 expire is spent first. Lowest rank wins; ties keep ID order:
 
-1. Not observed since start (`Quota.ObservedAt` zero), or the observed reset has
-   passed: tried first. A response without quota headers leaves the old snapshot in
+1. Not observed since start (`Quota.ObservedAt` zero; with
+   `save-cooldown-status: true` a restored observation counts as observed), or the
+   observed reset has passed: tried first. A response without quota headers leaves the old snapshot in
    place, so such a credential keeps this rank on every pick until a response with
    headers arrives (meanwhile the strategy keeps choosing it, like fill-first).
 2. Known future reset: soonest first.
@@ -102,3 +103,20 @@ It only reads the quota headers the hub already stores after each response. It m
 no extra upstream calls and keeps no state.
 Tests: `selector_soonest_reset_test.go`, `service_config_soonest_reset_test.go`,
 `config_basic_soonest_reset_test.go`.
+
+## Persisted quota observations
+
+Active only with `routing.cooldown.save-cooldown-status: true` and never under Home
+(the cooldown store is nil there). Each `.cds` record may carry an `observation`
+object: `signals` (quota headers only, re-filtered through
+`isQuotaSignalHeaderForProvider` on write and on restore), `observed_at` and
+`source` (`response_headers`). A credential or model that is not cooling gets an
+observation-only record with `status: observed` and a zero `next_retry_after`.
+Restore sets only `Quota.Signals`/`ObservedAt` (newest wins) and never creates,
+extends or shortens a cooldown. Saves caused only by an observation change are
+throttled to one per 30s; cooldown saves carry the latest observations, and
+shutdown flushes pending ones. A crash loses at most the observations since the
+last save. Older builds ignore the `observation` field and the observation-only
+records (their `next_retry_after` is zero) and drop them on their next save.
+Code: `sdk/cliproxy/auth/quota_observation_state.go`; tests:
+`quota_observation_state_test.go`.

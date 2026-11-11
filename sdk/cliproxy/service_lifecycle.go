@@ -374,6 +374,10 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				}
 			}
 		}
+		// Requests have drained; write observations the throttle window held back.
+		if s.coreManager != nil {
+			s.coreManager.FlushQuotaObservations(ctx)
+		}
 
 		if s.pluginHost != nil {
 			sdktranslator.SetPluginHooks(nil)
