@@ -18,45 +18,98 @@ yet. Account metadata refreshes context length and Codex speed tiers on models
 already listed. A failed account fetch keeps the upstream catalog. If the
 upstream fetch fails it returns 502 and the proxy keeps its last valid catalog. Serves :8318 on all interfaces (LAN + tailnet subnet route);
 without a valid client key the proxy itself refuses the upstream call.
+
+The ultrafast account's model list is fetched through the proxy, never with a
+token read from disk: POST <management>/requests/api-call with the credential's
+auth_index and "Authorization: Bearer $TOKEN$" (the proxy substitutes the token).
+This script opens no auth file. Everything host-specific is configuration:
+  instance map  ~/.config/cli-proxy/instances.json (CLI_PROXY_INSTANCES), the first
+                "codex" instance is the proxy to forward to and to call
+  catalog.json  ~/.config/cli-proxy-catalog/catalog.json (CLI_PROXY_CATALOG_CONFIG):
+                {"credential": "<auth file name of the ultrafast account>",
+                 "management_key_file": "<optional path, default: the rerank key>"}
+Without "credential" the account models are skipped and only upstream data is served.
 """
 import json
+import os
 import urllib.error
 import urllib.request
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-PROXY = "http://127.0.0.1:8317"
+INSTANCES_FILE = Path(os.environ.get("CLI_PROXY_INSTANCES") or Path.home() / ".config/cli-proxy/instances.json")
+CONFIG_FILE = Path(os.environ.get("CLI_PROXY_CATALOG_CONFIG") or Path.home() / ".config/cli-proxy-catalog/catalog.json")
+DEFAULT_KEY_FILE = Path.home() / ".config/cli-proxy-rerank/management-key"
+BUILTIN_INSTANCES = [
+    {"id": "codex-primary", "provider": "codex", "base_url": "http://127.0.0.1:8317", "management_path": "/v8/management"},
+]
 SUFFIX = " · CLIP"
 FORWARD_HEADERS = ("Authorization", "User-Agent", "originator", "Accept", "version")
 REGISTRY_UPSTREAM = "https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/models.json"
 EXTRA_MODELS = Path.home() / ".config/cli-proxy-catalog/extra-models.json"
 CODEX_REGISTRY_UPSTREAM = "https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/codex_client_models.json"
-ULTRAFAST_AUTH = Path.home() / ".local/share/cli-proxy-api/auth/<codex-auth-file-name>.json"  # scrubbed placeholder
+
+
+def load_config() -> dict:
+    try:
+        return json.loads(CONFIG_FILE.read_text())
+    except FileNotFoundError:
+        return {}
+
+
+def codex_instance() -> dict:
+    try:
+        instances = json.loads(INSTANCES_FILE.read_text())["instances"]
+    except FileNotFoundError:
+        instances = BUILTIN_INSTANCES
+    return next(i for i in instances if i.get("provider") == "codex")
+
+
+def proxy_base() -> str:
+    return codex_instance()["base_url"].rstrip("/")
+
+
+def management(method: str, path: str, body=None):
+    instance = codex_instance()
+    key_file = Path(load_config().get("management_key_file") or DEFAULT_KEY_FILE).expanduser()
+    req = urllib.request.Request(
+        instance["base_url"].rstrip("/") + instance.get("management_path", "/v8/management") + path,
+        method=method,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Authorization": "Bearer " + key_file.read_text().strip(), "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.load(resp)
 
 
 def load_account_models() -> list:
-    """Live Codex catalog for the ultrafast account. Empty when that auth is unusable."""
+    """Live Codex catalog for the ultrafast account, fetched through the proxy. Empty when unusable."""
     try:
-        auth = json.loads(ULTRAFAST_AUTH.read_text())
-    except (OSError, ValueError):
-        return []
-    if auth.get("email") != "<account-email>" or auth.get("disabled"):  # email scrubbed placeholder
-        return []
-    if not auth.get("access_token") or not auth.get("account_id"):
-        return []
-    req = urllib.request.Request(
-        "https://chatgpt.com/backend-api/codex/models?client_version=0.162.1",
-        headers={
-            "Authorization": "Bearer " + auth["access_token"],
-            "Chatgpt-Account-Id": auth["account_id"],
-            "User-Agent": "codex_cli_rs/0.162.1 (Linux; x86_64)",
-            "Originator": "codex_cli_rs",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            models = json.load(resp).get("models") or []
-    except (OSError, ValueError, urllib.error.URLError):
+        name = load_config().get("credential")
+        if not name:
+            return []
+        cred = next((c for c in management("GET", "/credentials")["files"]
+                     if c.get("name") == name and c.get("provider") == "codex"), None)
+        if cred is None or cred.get("disabled") or not cred.get("auth_index"):
+            return []
+        account_id = (cred.get("id_token") or {}).get("chatgpt_account_id")
+        if not account_id:
+            return []
+        reply = management("POST", "/requests/api-call", {
+            "auth_index": cred["auth_index"],
+            "method": "GET",
+            "url": "https://chatgpt.com/backend-api/codex/models?client_version=0.162.1",
+            "header": {
+                "Authorization": "Bearer $TOKEN$",
+                "Chatgpt-Account-Id": account_id,
+                "User-Agent": "codex_cli_rs/0.162.1 (Linux; x86_64)",
+                "Originator": "codex_cli_rs",
+            },
+        })
+        if reply.get("status_code") != 200:
+            return []
+        models = json.loads(reply["body"]).get("models") or []
+    except (OSError, ValueError, KeyError, StopIteration, urllib.error.URLError):
         return []
     return [model for model in models if isinstance(model, dict) and model.get("slug")]
 
@@ -191,7 +244,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.path.startswith("/v1/models"):
             self.send_error(404)
             return
-        req = urllib.request.Request(PROXY + self.path)
+        req = urllib.request.Request(proxy_base() + self.path)
         for h in FORWARD_HEADERS:
             if self.headers.get(h):
                 req.add_header(h, self.headers[h])

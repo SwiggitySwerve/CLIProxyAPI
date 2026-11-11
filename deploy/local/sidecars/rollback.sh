@@ -60,5 +60,5 @@ if [ "$APPLY" -ne 1 ]; then
   echo "DRY RUN: nothing changed. Re-run with --apply to proceed."
 else
   echo
-  echo "Next (not done by this script): systemctl --user daemon-reload && systemctl --user restart cli-proxy-exporter"
+  echo "Next (not done by this script): systemctl --user daemon-reload && systemctl --user restart cli-proxy-exporter cli-proxy-catalog"
 fi

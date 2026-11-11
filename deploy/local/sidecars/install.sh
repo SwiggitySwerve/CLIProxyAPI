@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install the local sidecars (rerank, exporter) and their systemd units to their live
+# Install the local sidecars (rerank, exporter, catalog) and their systemd units to their live
 # locations. Shows a diff for every file first; with --apply, backs the originals up to
 #   ~/.local/share/cli-proxy-backups/<timestamp>/   (undo with rollback.sh)
 # and then copies. Dry-run is the default: nothing is written without --apply.
@@ -7,6 +7,7 @@
 # This script never restarts, enables or disables a unit. After --apply, run
 #   systemctl --user daemon-reload
 #   systemctl --user restart cli-proxy-exporter   # the exporter reads its code at start
+#   systemctl --user restart cli-proxy-catalog    # likewise the catalog; it also needs catalog.json (see catalog/)
 # yourself; the rerank timer picks up the new script on its next run.
 set -euo pipefail
 
@@ -36,6 +37,8 @@ FILES=(
   "$SRC/rerank/cli-proxy-rerank.timer|$UNITS/cli-proxy-rerank.timer|0644"
   "$SRC/exporter/cli-proxy-exporter|$BIN/cli-proxy-exporter|0700"
   "$SRC/exporter/cli-proxy-exporter.service|$UNITS/cli-proxy-exporter.service|0644"
+  "$SRC/catalog/cli-proxy-catalog|$BIN/cli-proxy-catalog|0700"
+  "$SRC/catalog/cli-proxy-catalog.service|$UNITS/cli-proxy-catalog.service|0644"
 )
 
 # Config the scripts read. Created only when missing, never overwritten.
@@ -119,5 +122,5 @@ for entry in "${CHANGED[@]}"; do
 done
 echo
 echo "Backup: $BACKUP"
-echo "Next (not done by this script): systemctl --user daemon-reload && systemctl --user restart cli-proxy-exporter"
+echo "Next (not done by this script): systemctl --user daemon-reload && systemctl --user restart cli-proxy-exporter cli-proxy-catalog"
 echo "Undo:   $SRC/rollback.sh --from $BACKUP --apply"
