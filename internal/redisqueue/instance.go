@@ -1,6 +1,15 @@
 package redisqueue
 
-import "strings"
+import (
+	"os"
+	"strings"
+)
+
+// DeploymentInstanceID returns the validated CLIPROXY_INSTANCE_ID, or "" when it
+// is unset or invalid. Usage records and the v8 credentials listing share it.
+func DeploymentInstanceID() string {
+	return deploymentInstanceID(os.Getenv("CLIPROXY_INSTANCE_ID"))
+}
 
 // deploymentInstanceID is operator-supplied provenance, never an account or
 // credential-derived identity. Missing/invalid configuration stays unattributed.
