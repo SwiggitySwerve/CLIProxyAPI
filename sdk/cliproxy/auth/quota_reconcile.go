@@ -34,6 +34,8 @@ type quotaReconciler struct {
 	wake     atomic.Pointer[chan struct{}]
 	schedule quotaRecheckSchedule
 	adapters sync.Map // lowercase provider -> QuotaRecheckAdapter
+	// allCooled spaces the synchronous rechecks run when every candidate is cooled.
+	allCooled allCooledGate
 }
 
 // StartQuotaReconciler launches a loop that, for each provider enabled in quota-reconcile, rechecks credentials
@@ -116,42 +118,51 @@ func (m *Manager) reconcileQuotaCooldowns(ctx context.Context) {
 			continue
 		}
 
-		// Capture the cooldown the probe is about to judge so a newer one set
-		// while the probe is in flight is not cleared by a stale verdict.
-		identity := newQuotaCooldownIdentity(auth)
-		verdict, err := m.quotaRecheckVerdict(ctx, adapter, auth)
-		if err != nil {
-			log.Debugf("quota reconcile: probe failed for %s: %v", auth.ID, err)
-			continue
-		}
-		if policy.mode == internalconfig.QuotaReconcileObserve {
-			log.WithFields(log.Fields{
-				"provider":    strings.ToLower(strings.TrimSpace(auth.Provider)),
-				"auth_id":     auth.ID,
-				"verdict":     verdict.State.String(),
-				"source":      verdict.Source,
-				"signals":     summarizeQuotaSignals(verdict.Signals),
-				"cooldown_to": auth.Quota.NextRecoverAt,
-			}).Info("quota recheck: observed verdict, cooldown kept (observe mode)")
-			continue
-		}
-		if verdict.State != QuotaVerdictAllowed {
-			continue
-		}
-		_, _, errReset := m.resetQuota(ctx, auth.ID, func(current *Auth) bool {
-			return newQuotaCooldownIdentity(current) == identity
-		})
-		if errors.Is(errReset, errQuotaCooldownChanged) {
-			log.Infof("quota reconcile: cooldown for %s changed during the probe, keeping it", auth.ID)
-			continue
-		}
-		if errReset != nil {
-			log.Warnf("quota reconcile: reset failed for %s: %v", auth.ID, errReset)
-			continue
-		}
-		schedule.noteCleared(auth.ID, schedule.now())
-		log.Infof("quota reconcile: provider reports usage allowed, cleared stale quota cooldown for %s", auth.ID)
+		m.recheckQuotaCooldown(ctx, adapter, policy.mode, auth)
 	}
+}
+
+// recheckQuotaCooldown asks adapter for auth's verdict and, in clear mode,
+// clears the cooldown when the provider says usage is allowed. It reports
+// whether the cooldown was cleared.
+func (m *Manager) recheckQuotaCooldown(ctx context.Context, adapter QuotaRecheckAdapter, mode internalconfig.QuotaReconcileMode, auth *Auth) bool {
+	schedule := &m.quotaReconcile.schedule
+	// Capture the cooldown the probe is about to judge so a newer one set
+	// while the probe is in flight is not cleared by a stale verdict.
+	identity := newQuotaCooldownIdentity(auth)
+	verdict, err := m.quotaRecheckVerdict(ctx, adapter, auth)
+	if err != nil {
+		log.Debugf("quota reconcile: probe failed for %s: %v", auth.ID, err)
+		return false
+	}
+	if mode == internalconfig.QuotaReconcileObserve {
+		log.WithFields(log.Fields{
+			"provider":    strings.ToLower(strings.TrimSpace(auth.Provider)),
+			"auth_id":     auth.ID,
+			"verdict":     verdict.State.String(),
+			"source":      verdict.Source,
+			"signals":     summarizeQuotaSignals(verdict.Signals),
+			"cooldown_to": auth.Quota.NextRecoverAt,
+		}).Info("quota recheck: observed verdict, cooldown kept (observe mode)")
+		return false
+	}
+	if mode != internalconfig.QuotaReconcileClear || verdict.State != QuotaVerdictAllowed {
+		return false
+	}
+	_, _, errReset := m.resetQuota(ctx, auth.ID, func(current *Auth) bool {
+		return newQuotaCooldownIdentity(current) == identity
+	})
+	if errors.Is(errReset, errQuotaCooldownChanged) {
+		log.Infof("quota reconcile: cooldown for %s changed during the probe, keeping it", auth.ID)
+		return false
+	}
+	if errReset != nil {
+		log.Warnf("quota reconcile: reset failed for %s: %v", auth.ID, errReset)
+		return false
+	}
+	schedule.noteCleared(auth.ID, schedule.now())
+	log.Infof("quota reconcile: provider reports usage allowed, cleared stale quota cooldown for %s", auth.ID)
+	return true
 }
 
 func (m *Manager) quotaRecheckVerdict(ctx context.Context, adapter QuotaRecheckAdapter, auth *Auth) (QuotaVerdict, error) {

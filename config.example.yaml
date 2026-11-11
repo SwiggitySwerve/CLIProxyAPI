@@ -271,6 +271,10 @@ routing:
     #   near-reset-window: how long before a known reset the near interval applies (default codex 0, others 1h).
     # After the loop clears a cooldown, a quota 429 within 10 minutes doubles that credential's
     # interval (up to 6h) until its known reset passes.
+    # When every candidate for a request is cooled, one recheck round runs before the 429 (at most
+    # once per credential per 60s): claude sends the request itself on a cooled credential and a 200
+    # with an allowed unified status clears the cooldown in clear mode (observe serves it but keeps
+    # the cooldown); codex asks its usage endpoint and then selects again.
     # Example:
     #   quota-reconcile:
     #     codex: {mode: clear}

@@ -98,6 +98,22 @@ Config: `internal/config/quota_reconcile.go`. Cadence and backoff:
 `quota_recheck_schedule.go`. Tests: `quota_recheck_modes_test.go`,
 `internal/config/quota_reconcile_test.go`.
 
+When every candidate for a request is cooled, the request runs one recheck round before
+it returns the cooldown 429 (`quota_all_cooled.go`, hooked into `executeMixedOnce` and
+`executeStreamMixedOnce` where selection fails). It only applies to credentials holding a
+quota cooldown whose provider mode is not `off`, never runs while an uncooled candidate
+exists, bypasses the per-credential schedule above, and skips Home mode. Providers listed
+in `allCooledTrialVerdicts` (Claude) get a half-open trial: the user's own request is sent
+on the cooled credential with the oldest last check, then the next, up to
+`request-retry + 1` trials. A 200 whose `Anthropic-Ratelimit-Unified-Status` is `allowed`
+or `allowed_warning` is served and, in `clear` mode, clears the cooldown (guarded by the
+cooldown identity); `observe` serves it but keeps the cooldown. A 429 goes through
+`MarkResult` as usual. Other providers with a registered adapter (Codex) get a synchronous
+`Verdict` per cooled credential and then selection runs again. Each credential is rechecked
+at most once per 60s; inside that gap, and when nothing succeeds, the request returns the
+same error it returned before this round existed. Token counting is not covered.
+Tests: `quota_all_cooled_test.go`. Staging: `deploy/local/staging/scenarios/all-cooled-one-lifts.sh`.
+
 ## Quota recheck probe deadlines
 
 Named exception to the AGENTS.md rule that forbids timeouts once an upstream connection
