@@ -25,7 +25,8 @@ status_request() {
     -d "{\"model\":\"claude-staging-model\",\"max_tokens\":32,\"messages\":[{\"role\":\"user\",\"content\":\"$1\"}]}")
   echo "${out##*$'\n'} ${out%$'\n'*}"
 }
-count() { mock_log "$1" | jq 'length'; }
+# count <cred>: inference requests the mock received for a credential.
+count() { mock_log "$1" | jq '[.[] | select(.method == "POST")] | length'; }
 
 echo "== setup: quota-reconcile claude: clear, A and B rejected-7d (reset +6d) =="
 sed -i 's|^    quota-reconcile: .*$|    quota-reconcile: {codex: {mode: clear}, claude: {mode: clear}}|' "$DATA_DIR/config.yaml"
@@ -38,18 +39,29 @@ mock_set "$CRED_B" rejected-7d '"reset_in":518400' >/dev/null
 read -r status body <<<"$(status_request "all cooled 1")"
 check "first request returns 429 (got $status)" test "$status" = 429
 check "A and B each answered one 429" test "$(count "$CRED_A")-$(count "$CRED_B")" = 1-1
+# The recheck loop (claude: clear) probes each fresh cooldown once on its next pass
+# (30s ticker), one more 429 each, and then waits its 30m interval. Wait for that
+# so the trial round below is measured against a settled baseline.
+for _ in $(seq 1 40); do
+  [ "$(count "$CRED_A")-$(count "$CRED_B")" = 2-2 ] && break
+  sleep 1
+done
+check "the recheck loop probed A and B once each" test "$(count "$CRED_A")-$(count "$CRED_B")" = 2-2
+base_a=$(count "$CRED_A")
+base_b=$(count "$CRED_B")
+delta() { echo "$(($(count "$CRED_A") - base_a))-$(($(count "$CRED_B") - base_b))"; }
 
 read -r status body <<<"$(status_request "all cooled 2")"
 trial_round=$(date +%s)
 check "all-cooled request still returns 429 (got $status)" test "$status" = 429
-check "the round trialled each credential once" test "$(count "$CRED_A")-$(count "$CRED_B")" = 2-2
+check "the round trialled each credential once ($(delta))" test "$(delta)" = 1-1
 check "the 429 is the proxy's cooldown error" grep -q 'cooling down' <<<"$body"
 
 echo "== lift B in the mock =="
 mock_set "$CRED_B" lift >/dev/null
 read -r status body <<<"$(status_request "inside the gap")"
 check "inside the 60s gap the request returns 429 (got $status)" test "$status" = 429
-check "inside the gap nothing reached upstream" test "$(count "$CRED_A")-$(count "$CRED_B")" = 2-2
+check "inside the gap nothing reached upstream ($(delta))" test "$(delta)" = 1-1
 
 served_at=""
 for i in $(seq 1 $(((GAP + SLACK) / 5))); do
@@ -65,8 +77,8 @@ elapsed=$((served_at - trial_round))
 echo "served $elapsed s after the trial round"
 check "served by B" jq -e --arg c "$CRED_B" '.content[0].text | endswith($c)' <<<"$body"
 check "served within the 60s gap plus ${SLACK}s" test "$elapsed" -le $((GAP + SLACK))
-check "B was trialled exactly once more" test "$(count "$CRED_B")" = 3
-check "A was trialled at most once more" test "$(count "$CRED_A")" -le 3
+check "B was trialled exactly once more" test "$(($(count "$CRED_B") - base_b))" = 2
+check "A was trialled at most once more" test "$(($(count "$CRED_A") - base_a))" -le 2
 
 a_before=$(count "$CRED_A")
 body=$(claude_request '' "after the lift")
