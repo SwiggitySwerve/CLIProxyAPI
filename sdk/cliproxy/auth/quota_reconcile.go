@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -29,14 +30,14 @@ const (
 // rollover). Without reconciliation the stale cooldown blocks the credential
 // until that stored time passes.
 type quotaReconciler struct {
-	started   atomic.Bool
-	wake      atomic.Pointer[chan struct{}]
-	lastProbe sync.Map // auth ID -> time.Time
-	adapters  sync.Map // lowercase provider -> QuotaRecheckAdapter
+	started  atomic.Bool
+	wake     atomic.Pointer[chan struct{}]
+	schedule quotaRecheckSchedule
+	adapters sync.Map // lowercase provider -> QuotaRecheckAdapter
 }
 
-// StartQuotaReconciler launches a loop that, when quota-reconcile is enabled, probes Codex credentials sitting in
-// a quota cooldown and clears the cooldown once the provider reports usage is
+// StartQuotaReconciler launches a loop that, for each provider enabled in quota-reconcile, rechecks credentials
+// sitting in a quota cooldown and, in clear mode, clears the cooldown once the provider reports usage is
 // allowed. It also runs when a request is rejected because of a cooldown.
 func (m *Manager) StartQuotaReconciler(parent context.Context, interval time.Duration) {
 	if m == nil || !m.quotaReconcile.started.CompareAndSwap(false, true) {
@@ -92,9 +93,12 @@ func authHasQuotaCooldown(auth *Auth) bool {
 }
 
 func (m *Manager) reconcileQuotaCooldowns(ctx context.Context) {
-	if cfg := m.runtimeConfigSnapshot(); cfg == nil || !cfg.QuotaReconcile {
+	// Home mode dispatches credentials from the control plane, so the loop stays idle.
+	cfg := m.runtimeConfigSnapshot()
+	if cfg == nil || cfg.Home.Enabled || len(cfg.QuotaReconcile) == 0 {
 		return
 	}
+	schedule := &m.quotaReconcile.schedule
 	for _, auth := range m.List() {
 		if ctx.Err() != nil {
 			return
@@ -103,14 +107,14 @@ func (m *Manager) reconcileQuotaCooldowns(ctx context.Context) {
 			continue
 		}
 		adapter := m.quotaRecheckAdapter(auth.Provider)
-		if adapter == nil {
+		policy := quotaRecheckPolicyFor(cfg, auth.Provider)
+		if adapter == nil || policy.mode == internalconfig.QuotaReconcileOff {
 			continue
 		}
-		now := time.Now()
-		if last, ok := m.quotaReconcile.lastProbe.Load(auth.ID); ok && now.Sub(last.(time.Time)) < quotaProbeMinGap {
+		now := schedule.now()
+		if !schedule.begin(auth.ID, now, policy, soonestKnownReset(auth, now)) {
 			continue
 		}
-		m.quotaReconcile.lastProbe.Store(auth.ID, now)
 
 		// Capture the cooldown the probe is about to judge so a newer one set
 		// while the probe is in flight is not cleared by a stale verdict.
@@ -118,6 +122,17 @@ func (m *Manager) reconcileQuotaCooldowns(ctx context.Context) {
 		verdict, err := m.quotaRecheckVerdict(ctx, adapter, auth)
 		if err != nil {
 			log.Debugf("quota reconcile: probe failed for %s: %v", auth.ID, err)
+			continue
+		}
+		if policy.mode == internalconfig.QuotaReconcileObserve {
+			log.WithFields(log.Fields{
+				"provider":    strings.ToLower(strings.TrimSpace(auth.Provider)),
+				"auth_id":     auth.ID,
+				"verdict":     verdict.State.String(),
+				"source":      verdict.Source,
+				"signals":     summarizeQuotaSignals(verdict.Signals),
+				"cooldown_to": auth.Quota.NextRecoverAt,
+			}).Info("quota recheck: observed verdict, cooldown kept (observe mode)")
 			continue
 		}
 		if verdict.State != QuotaVerdictAllowed {
@@ -134,6 +149,7 @@ func (m *Manager) reconcileQuotaCooldowns(ctx context.Context) {
 			log.Warnf("quota reconcile: reset failed for %s: %v", auth.ID, errReset)
 			continue
 		}
+		schedule.noteCleared(auth.ID, schedule.now())
 		log.Infof("quota reconcile: provider reports usage allowed, cleared stale quota cooldown for %s", auth.ID)
 	}
 }

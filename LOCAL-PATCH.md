@@ -83,6 +83,30 @@ cleared only if it is still the one the probe observed (recover time, credential
 version and epoch unchanged), so a newer cooldown set mid-probe survives.
 Tests: `quota_reconcile_test.go`, `quota_recheck_test.go`.
 
+`quota-reconcile` takes the old bool (`true` is `codex: clear`, `false` is off) or a
+per-provider map, for example
+`{codex: {mode: clear}, claude: {mode: observe, interval: 30m, near-reset-interval: 5m, near-reset-window: 1h}}`.
+`mode` is `off`, `observe` (log the verdict with provider, credential id, verdict and
+signals; never clear) or `clear`. Each cooled credential has its own next-check time:
+`interval` normally, `near-reset-interval` within `near-reset-window` before its soonest
+known reset. Codex defaults reproduce the original loop (every pass, at least 10s
+apart, no near window); other providers default to 30m, 5m and 1h, and no interval
+goes below 10s. If a credential the loop cleared gets a quota 429 within 10 minutes,
+its interval doubles (cap 6h) until its known reset passes. The loop stays idle in
+Home mode, and `service_lifecycle.go` still only starts it outside Home mode.
+Config: `internal/config/quota_reconcile.go`. Cadence and backoff:
+`quota_recheck_schedule.go`. Tests: `quota_recheck_modes_test.go`,
+`internal/config/quota_reconcile_test.go`.
+
+## Quota recheck probe deadlines
+
+Named exception to the AGENTS.md rule that forbids timeouts once an upstream connection
+exists: the quota recheck probe deadlines in `sdk/cliproxy/auth/quota_reconcile.go`
+(`quotaProbeTimeout`, 20s, wraps each adapter `Verdict`). The probe is a background
+check, not a user request, and a hung probe would stall the loop for every other
+credential. AGENTS.md cannot change in a PR here (a workflow auto-closes such PRs),
+so the exception is recorded here and in the PR body.
+
 ## Soonest-reset routing
 
 Local only. Set `routing.strategy: soonest-reset` (also `soonestreset`, `sr`).

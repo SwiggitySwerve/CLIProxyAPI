@@ -97,9 +97,11 @@ type Config struct {
 	// SaveCooldownStatus persists runtime cooldown status next to auth files when true.
 	SaveCooldownStatus bool `yaml:"save-cooldown-status" json:"save-cooldown-status"`
 
-	// QuotaReconcile clears Codex quota cooldowns once the provider usage report says the
-	// credential may be used again. It sends a read-only usage request per cooled-down credential.
-	QuotaReconcile bool `yaml:"quota-reconcile" json:"quota-reconcile"`
+	// QuotaReconcile rechecks cooled-down credentials per provider and, in clear mode, clears
+	// quota cooldowns the provider has already lifted. YAML accepts the legacy bool (true is
+	// codex in clear mode) or a per-provider map. Codex sends a read-only usage request per
+	// cooled-down credential.
+	QuotaReconcile QuotaReconcileConfig `yaml:"quota-reconcile" json:"quota-reconcile"`
 
 	// TransientErrorCooldownSeconds controls cooldowns for transient upstream errors (408/500/502/503/504/520-526).
 	// 0 keeps the legacy default cooldown. Negative values disable these cooldowns.

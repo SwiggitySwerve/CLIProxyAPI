@@ -51,7 +51,9 @@ func registerCooledAuth(t *testing.T, manager *Manager, id, provider string) {
 
 func TestReconcileQuotaCooldownsDispatchesByProvider(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
-	manager.SetConfig(&internalconfig.Config{QuotaReconcile: true})
+	manager.SetConfig(&internalconfig.Config{QuotaReconcile: internalconfig.QuotaReconcileConfig{
+		"claude": {Mode: internalconfig.QuotaReconcileClear}, "nobody": {Mode: internalconfig.QuotaReconcileClear},
+	}})
 	adapter := &fakeRecheckAdapter{provider: "Claude", verdict: QuotaVerdict{State: QuotaVerdictAllowed, Source: "fake"}}
 	manager.RegisterQuotaRecheckAdapter(adapter)
 	registerCooledAuth(t, manager, "claude-1", "claude")
@@ -78,7 +80,9 @@ func TestReconcileQuotaCooldownsOnlyAllowedVerdictClears(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			manager := NewManager(nil, nil, nil)
-			manager.SetConfig(&internalconfig.Config{QuotaReconcile: true})
+			manager.SetConfig(&internalconfig.Config{QuotaReconcile: internalconfig.QuotaReconcileConfig{
+				"claude": {Mode: internalconfig.QuotaReconcileClear},
+			}})
 			manager.RegisterQuotaRecheckAdapter(tc)
 			registerCooledAuth(t, manager, "claude-1", "claude")
 

@@ -38,7 +38,7 @@ func newQuotaCooldownManager(t *testing.T, exec *usageProbeExecutor) (*Manager, 
 	t.Helper()
 	manager := NewManager(nil, nil, nil)
 	manager.RegisterExecutor(exec)
-	manager.SetConfig(&internalconfig.Config{QuotaReconcile: true})
+	manager.SetConfig(&internalconfig.Config{QuotaReconcile: internalconfig.QuotaReconcileFromBool(true)})
 	next := time.Now().Add(100 * time.Hour)
 	authID := "quota-reconcile-codex"
 	if _, err := manager.Register(context.Background(), &Auth{
@@ -98,7 +98,7 @@ func TestReconcileQuotaCooldownsIgnoresHealthyAndDisabledAuths(t *testing.T) {
 	exec := &usageProbeExecutor{status: http.StatusOK, body: `{"rate_limit":{"allowed":true,"limit_reached":false}}`}
 	manager := NewManager(nil, nil, nil)
 	manager.RegisterExecutor(exec)
-	manager.SetConfig(&internalconfig.Config{QuotaReconcile: true})
+	manager.SetConfig(&internalconfig.Config{QuotaReconcile: internalconfig.QuotaReconcileFromBool(true)})
 	next := time.Now().Add(time.Hour)
 	if _, err := manager.Register(context.Background(), &Auth{ID: "healthy", Provider: "codex", Status: StatusActive}); err != nil {
 		t.Fatal(err)
