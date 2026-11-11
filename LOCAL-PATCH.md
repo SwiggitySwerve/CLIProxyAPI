@@ -1,6 +1,11 @@
 # Local patch: ultrafast account gate
 
-Base: upstream `v8.0.44` (`1f917e77`). Branch: `local/ultrafast-v8.0.44`.
+Base: upstream `v8.0.65` (`65de937c`). Branch: `local/ultrafast-v8.0.65`.
+
+Rebased from `v8.0.44` on 2026-11-11. Upstream replaced `tidwall/gjson`/`sjson`
+with `MoeForge/moego/ojson` and rewrote the Codex executors and usage parsers on
+`ojson.Doc`; the patches now use `ojson` and sit beside upstream's new hosted
+image-generation check (the tier guard runs right after it).
 
 This is a deployment-specific policy patch, not an upstream feature. Upstream
 already forwards the `ultrafast` service tier (#5924). This patch only decides
@@ -33,7 +38,7 @@ turns into a hard ultrafast outage until it is cleared with
 `ultrafastAccountEmail` is a compile-time constant and the tests hard-code the
 same address. Update both when moving the entitlement.
 
-## Verification (v8.0.44, golang:1.26-bookworm)
+## Verification (v8.0.65, golang:1.26-bookworm)
 
     gofmt -l <changed files>   # clean
     go build ./...
