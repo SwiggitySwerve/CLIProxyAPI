@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"maps"
 	"sort"
 	"strings"
 	"sync"
@@ -19,6 +20,12 @@ const (
 	claudeRecheckInterval     = 30 * time.Minute
 	claudeRecheckNearInterval = 5 * time.Minute
 	claudeRecheckNearWindow   = time.Hour
+
+	// quotaTriggerMinGap is the shortest gap between two verdicts when a usage
+	// snapshot change asks for an early one.
+	quotaTriggerMinGap = 2 * time.Minute
+	// quotaSnapshotBackoffCap bounds the snapshot interval after failed snapshots.
+	quotaSnapshotBackoffCap = time.Hour
 )
 
 // quotaRecheckPolicy is the resolved recheck setting for one provider.
@@ -82,6 +89,14 @@ type quotaRecheckState struct {
 	backoffLevel int
 	// backoffResetAt is the known reset time after which the backoff is dropped.
 	backoffResetAt time.Time
+
+	// snapshotNext is when the advisory usage snapshot is next due.
+	snapshotNext time.Time
+	// snapshotFailures counts consecutive failed snapshots for their backoff.
+	snapshotFailures int
+	// snapshotSignals is the last successful snapshot, the baseline for change
+	// detection.
+	snapshotSignals map[string]string
 }
 
 // quotaRecheckSchedule holds per-credential state for the recheck loop. clock
@@ -129,6 +144,25 @@ func (s *quotaRecheckSchedule) begin(id string, now time.Time, policy quotaReche
 	if now.Before(st.nextCheck) {
 		return false
 	}
+	st.book(now, policy, knownReset)
+	return true
+}
+
+// beginTriggered books an early check for id after a change trigger, unless the
+// previous check ran less than quotaTriggerMinGap before now.
+func (s *quotaRecheckSchedule) beginTriggered(id string, now time.Time, policy quotaRecheckPolicy, knownReset time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.state(id)
+	if !st.probedAt.IsZero() && now.Sub(st.probedAt) < quotaTriggerMinGap {
+		return false
+	}
+	st.book(now, policy, knownReset)
+	return true
+}
+
+// book records a check at now and schedules the next one.
+func (st *quotaRecheckState) book(now time.Time, policy quotaRecheckPolicy, knownReset time.Time) {
 	if st.backoffLevel > 0 {
 		if st.backoffResetAt.IsZero() {
 			st.backoffResetAt = knownReset
@@ -139,14 +173,58 @@ func (s *quotaRecheckSchedule) begin(id string, now time.Time, policy quotaReche
 	st.probedAt = now
 	st.baseInterval = policy.baseInterval(now, knownReset)
 	st.nextCheck = now.Add(backedOffInterval(st.baseInterval, st.backoffLevel))
+}
+
+// beginSnapshot reports whether id's usage snapshot is due at now and, if so,
+// books the next one after interval.
+func (s *quotaRecheckSchedule) beginSnapshot(id string, now time.Time, interval time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.state(id)
+	if now.Before(st.snapshotNext) {
+		return false
+	}
+	st.snapshotNext = now.Add(interval)
 	return true
 }
 
-// noteCleared records that the loop cleared id's cooldown at now.
+// noteSnapshot stores signals as id's new baseline and reports whether changed
+// says they differ from the previous baseline. The first snapshot only sets the
+// baseline.
+func (s *quotaRecheckSchedule) noteSnapshot(id string, signals map[string]string, changed func(prev, next map[string]string) bool) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.state(id)
+	prev := st.snapshotSignals
+	st.snapshotSignals = maps.Clone(signals)
+	st.snapshotFailures = 0
+	return len(prev) > 0 && changed(prev, signals)
+}
+
+// noteSnapshotFailure keeps id's baseline and doubles the snapshot interval for
+// each consecutive failure, up to quotaSnapshotBackoffCap. It returns the wait.
+func (s *quotaRecheckSchedule) noteSnapshotFailure(id string, now time.Time, interval time.Duration) time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.state(id)
+	st.snapshotFailures++
+	wait := interval
+	for i := 0; i < st.snapshotFailures && wait < quotaSnapshotBackoffCap; i++ {
+		wait *= 2
+	}
+	wait = min(wait, max(quotaSnapshotBackoffCap, interval))
+	st.snapshotNext = now.Add(wait)
+	return wait
+}
+
+// noteCleared records that the loop cleared id's cooldown at now. The snapshot
+// baseline belongs to the cleared episode, so it is dropped.
 func (s *quotaRecheckSchedule) noteCleared(id string, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.state(id).lastCleared = now
+	st := s.state(id)
+	st.lastCleared = now
+	st.snapshotSignals = nil
 }
 
 // noteQuotaRejection records a quota 429 for id. When it follows a clear by the

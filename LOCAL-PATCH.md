@@ -78,7 +78,7 @@ against `/backend-api/wham/usage`. It is cleared through `Manager.ResetQuota` on
 when `rate_limit.allowed` is true and `limit_reached` is false. Failed, non-200 or
 incomplete probes keep the cooldown. Disabled credentials are never probed.
 Providers plug in through `QuotaRecheckAdapter` (`quota_recheck.go`, registered per
-provider with `Manager.RegisterQuotaRecheckAdapter`; only Codex has one). A cooldown is
+provider with `Manager.RegisterQuotaRecheckAdapter`; Codex and Claude have one). A cooldown is
 cleared only if it is still the one the probe observed (recover time, credential
 version and epoch unchanged), so a newer cooldown set mid-probe survives.
 Tests: `quota_reconcile_test.go`, `quota_recheck_test.go`.
@@ -98,11 +98,45 @@ Config: `internal/config/quota_reconcile.go`. Cadence and backoff:
 `quota_recheck_schedule.go`. Tests: `quota_recheck_modes_test.go`,
 `internal/config/quota_reconcile_test.go`.
 
+The Codex probe URL follows the credential's `base-url` when one is set (a trailing
+`/codex` is dropped, so `https://chatgpt.com/backend-api/codex` still maps to
+`.../backend-api/wham/usage`); without one it is the chatgpt.com default.
+
+### Claude adapter
+
+`quota_recheck_claude.go`, registered for `claude`. It only rechecks cooldowns set
+by a unified rate-limit rejection (credential-scoped `credential_quota`, or a model
+state carrying rejected unified windows); ordinary model-level 429s keep their own
+short backoff.
+
+- Verdict: one minimal real inference through `Manager.VerifyInference` (16 output
+  tokens) on the cheapest registered model (haiku, then sonnet, then the rest). Under
+  model-level cooling it skips models that have their own cooldown, because a success
+  clears that model through `MarkResult`. Allowed needs a completed 200 whose
+  `Anthropic-Ratelimit-Unified-Status` is `allowed` or `allowed_warning`, no window
+  `rejected`, and every window that set the cooldown reported as allowed. A 429 or a
+  rejected status is limited; `MarkResult` inside `VerifyInference` re-derives the
+  deadline once and the loop adds nothing. Everything else is unknown and keeps the
+  cooldown. A clear goes through the same guarded `resetQuota` as Codex.
+- Usage snapshot (advisory, never clears): `GET /api/oauth/usage` with
+  `anthropic-beta: oauth-2025-04-20` through the executor, at most every 10 minutes
+  per cooled OAuth credential. A moved reset time (more than 1 minute), a dropped
+  percentage, a changed limit severity or `is_active`, or toggled extra usage or spend
+  requests an early verdict, at least 2 minutes after the previous one. A failed
+  snapshot (including the endpoint's occasional 429) keeps the baseline and doubles
+  the snapshot interval, capped at 1 hour.
+- In `observe` mode verdicts are logged at info, including unknown ones with their
+  reason. Claude is only rechecked when `quota-reconcile` lists it; the legacy `true`
+  still means Codex only.
+
+Tests: `quota_recheck_claude_test.go`.
+
 ## Quota recheck probe deadlines
 
 Named exception to the AGENTS.md rule that forbids timeouts once an upstream connection
 exists: the quota recheck probe deadlines in `sdk/cliproxy/auth/quota_reconcile.go`
-(`quotaProbeTimeout`, 20s, wraps each adapter `Verdict`). The probe is a background
+(`quotaProbeTimeout`, 20s, wraps each adapter `Verdict` and each `UsageSnapshot`; for
+Claude the verdict is a 16-token inference request, which also runs under it). The probe is a background
 check, not a user request, and a hung probe would stall the loop for every other
 credential. AGENTS.md cannot change in a PR here (a workflow auto-closes such PRs),
 so the exception is recorded here and in the PR body.
