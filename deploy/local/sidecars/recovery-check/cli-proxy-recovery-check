@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""Record a masked snapshot of every proxy credential's quota signals and cooldown
+deadlines, so quota incidents can be diagnosed after the fact.
+
+Run by a systemd timer (cli-proxy-recovery-check.timer). Each run does one read-only
+GET /<management_path>/credentials per proxy instance and appends one JSON line to
+  ~/.local/share/cli-proxy-recovery-check/recovery.jsonl
+(override with --out PATH). The file rotates to recovery.jsonl.1 above MAX_BYTES.
+
+Privacy: credentials are labelled by instance id and auth_index only (an opaque hash).
+Emails, names, labels, paths and tokens are never read into a record. Only
+rate-limit response headers (Anthropic-Ratelimit-*, X-Codex-*, Retry-After) are kept.
+
+Instances come from the shared instance map (deploy/local/instances.example.json); the
+built-in values apply when the file is missing. The management key is read from the
+same file the rerank sidecar uses.
+"""
+import json
+import os
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+INSTANCES_FILE = Path(os.environ.get("CLI_PROXY_INSTANCES") or Path.home() / ".config/cli-proxy/instances.json")
+KEY_FILE = Path(os.environ.get("CLI_PROXY_MANAGEMENT_KEY_FILE") or Path.home() / ".config/cli-proxy-rerank/management-key")
+DEFAULT_OUT = Path.home() / ".local/share/cli-proxy-recovery-check/recovery.jsonl"
+MAX_BYTES = 64 * 1024 * 1024
+BUILTIN_INSTANCES = [
+    {"id": "claude-primary", "provider": "claude", "base_url": "http://127.0.0.1:8319", "management_path": "/v8/management"},
+    {"id": "codex-primary", "provider": "codex", "base_url": "http://127.0.0.1:8317", "management_path": "/v8/management"},
+]
+# Header names kept from quota signals (lower case). Everything else is dropped.
+SIGNAL_PREFIXES = ("anthropic-ratelimit-", "x-codex-")
+SIGNAL_EXACT = ("retry-after",)
+SIGNAL_DROP = ("anthropic-ratelimit-unified-upgrade-paths",)  # a URL list, not a quota value
+
+
+def load_instances():
+    try:
+        return json.loads(INSTANCES_FILE.read_text())["instances"]
+    except FileNotFoundError:
+        return BUILTIN_INSTANCES
+
+
+def keep_signals(signals):
+    out = {}
+    for name, value in (signals or {}).items():
+        low = str(name).lower()
+        if low in SIGNAL_DROP:
+            continue
+        if low in SIGNAL_EXACT or low.startswith(SIGNAL_PREFIXES):
+            out[name] = str(value)
+    return out
+
+
+def quota_block(quota):
+    quota = quota or {}
+    return {"observed_at": quota.get("observed_at"), "signals": keep_signals(quota.get("signals"))}
+
+
+def model_deltas(model_quotas, base_signals):
+    """Per-model signals, reduced to the headers that differ from the credential-level
+    ones (for example the Fable-only 7d_oi window), to keep records small."""
+    out = {}
+    for model, q in (model_quotas or {}).items():
+        sig = keep_signals((q or {}).get("signals"))
+        diff = {k: v for k, v in sig.items() if base_signals.get(k) != v}
+        if diff:
+            out[model] = {"observed_at": (q or {}).get("observed_at"), "signals": diff}
+    return out
+
+
+def credential_record(instance, f):
+    quota = quota_block(f.get("quota"))
+    return {
+        "instance": instance["id"],
+        "auth_index": f.get("auth_index"),
+        "provider": f.get("provider") or instance.get("provider"),
+        "status": f.get("status"),
+        "unavailable": f.get("unavailable"),
+        "disabled": f.get("disabled"),
+        "priority": f.get("priority"),
+        "quota_blocked": f.get("quota_blocked"),
+        "recovery_stage": f.get("recovery_stage"),
+        "success": f.get("success"),
+        "failed": f.get("failed"),
+        "cooldowns": [
+            {"scope": c.get("scope"), "reason": c.get("reason"), "retry_at": c.get("retry_at"),
+             "remaining_seconds": c.get("remaining_seconds")}
+            for c in f.get("cooldowns") or []
+        ],
+        "quota": quota,
+        "model_quotas": model_deltas(f.get("model_quotas"), quota["signals"]),
+    }
+
+
+def fetch(instance, key):
+    base = instance["base_url"].rstrip("/") + instance.get("management_path", "/v8/management")
+    req = urllib.request.Request(base + "/credentials", headers={"Authorization": f"Bearer {key}"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.load(resp)
+
+
+def append_line(path, line):
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if path.exists() and path.stat().st_size > MAX_BYTES:
+        os.replace(path, path.with_name(path.name + ".1"))
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "a") as fh:
+        fh.write(line + "\n")
+
+
+def main(argv):
+    out = DEFAULT_OUT
+    if "--out" in argv:
+        out = Path(argv[argv.index("--out") + 1])
+    key = KEY_FILE.read_text().strip()
+    credentials, errors = [], []
+    instances = load_instances()
+    for instance in instances:
+        try:
+            data = fetch(instance, key)
+        except Exception as e:  # one dead instance must not hide the other
+            errors.append({"instance": instance["id"], "error": type(e).__name__})
+            continue
+        credentials.extend(credential_record(instance, f) for f in data.get("files") or [])
+    record = {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "credentials": credentials}
+    if errors:
+        record["errors"] = errors
+    append_line(out, json.dumps(record, separators=(",", ":")))
+    return 1 if len(errors) == len(instances) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
