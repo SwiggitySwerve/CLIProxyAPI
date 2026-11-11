@@ -723,3 +723,43 @@ func (e *mockStreamErrorExecutor) CountTokens(ctx context.Context, auth *Auth, r
 func (e *mockStreamErrorExecutor) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
 	return nil, errors.New("not implemented")
 }
+
+// When every remaining candidate is cooled, the warning must also say which
+// credentials were left out before the cooldown check: a disabled credential
+// otherwise reads as "1 of 1 candidate(s) are in cooldown".
+func TestWarnLogAuthUnavailableCountsExcludedCredentials(t *testing.T) {
+	model := "warn-excluded-" + t.Name()
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&mockStreamErrorExecutor{identifier: "claude"})
+	for _, auth := range []*Auth{
+		{ID: "claude-cooled", Provider: "claude", Status: StatusActive},
+		{ID: "claude-disabled", Provider: "claude", Status: StatusDisabled, Disabled: true},
+	} {
+		if _, err := manager.Register(WithSkipPersist(context.Background()), auth); err != nil {
+			t.Fatalf("register %s: %v", auth.ID, err)
+		}
+		registry.GetGlobalRegistry().RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+		id := auth.ID
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+	}
+	retry := 100 * time.Hour
+	manager.MarkResult(context.Background(), Result{
+		AuthID: "claude-cooled", Provider: "claude", Model: model, CredentialScope: true, RetryAfter: &retry,
+		Error: &Error{Code: ErrorCodeCredentialQuota, Message: "rate_limit_error", HTTPStatus: http.StatusTooManyRequests},
+	})
+	hook := setupTestLoggerHook(t)
+
+	_, err := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if !isAuthUnavailableError(err) {
+		t.Fatalf("Execute error = %v, want the all-credentials-cooling-down error", err)
+	}
+	for _, entry := range hook.AllEntries() {
+		if entry.Level == log.WarnLevel && strings.Contains(entry.Message, "auth unavailable:") {
+			if !strings.Contains(entry.Message, "1 of 1 candidate(s)") || !strings.Contains(entry.Message, "excluded before the cooldown check: disabled=1") {
+				t.Fatalf("warning does not account for the disabled credential: %s", entry.Message)
+			}
+			return
+		}
+	}
+	t.Fatalf("expected an auth unavailable warning, got logs: %#v", hook.AllEntries())
+}
