@@ -10,14 +10,30 @@ Accounts that are limited right now, or whose quota can't be read, sink to the
 bottom so they're only used as a last resort.
 """
 import json
+import os
 import sys
 import time
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-# One proxy instance per provider: Codex/GPT accounts on :8317, Claude accounts on :8319.
-BASES = ("http://127.0.0.1:8317/v8/management", "http://127.0.0.1:8319/v8/management")
+# Proxy instances come from the shared instance map (deploy/local/instances.example.json);
+# the built-in values apply when the file is missing.
+INSTANCES_FILE = Path(os.environ.get("CLI_PROXY_INSTANCES") or Path.home() / ".config/cli-proxy/instances.json")
+BUILTIN_INSTANCES = [
+    {"id": "claude-primary", "provider": "claude", "base_url": "http://127.0.0.1:8319", "management_path": "/v8/management"},
+    {"id": "codex-primary", "provider": "codex", "base_url": "http://127.0.0.1:8317", "management_path": "/v8/management"},
+]
+
+
+def load_instances():
+    try:
+        return json.loads(INSTANCES_FILE.read_text())["instances"]
+    except FileNotFoundError:
+        return BUILTIN_INSTANCES
+
+
+BASES = tuple(i["base_url"].rstrip("/") + i.get("management_path", "/v8/management") for i in load_instances())
 KEY = (Path.home() / ".config/cli-proxy-rerank/management-key").read_text().strip()
 AUTH_DIR = Path.home() / ".local/share/cli-proxy-api/auth"
 TOP = 100  # priority of the first-choice account; each next one is 10 lower

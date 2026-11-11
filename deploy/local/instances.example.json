@@ -1,0 +1,4 @@
+{"instances": [
+  {"id": "claude-primary", "provider": "claude", "base_url": "http://127.0.0.1:8319", "management_path": "/v8/management"},
+  {"id": "codex-primary",  "provider": "codex",  "base_url": "http://127.0.0.1:8317", "management_path": "/v8/management"}
+]}

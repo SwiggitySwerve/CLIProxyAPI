@@ -15,6 +15,7 @@ Prometheus can scrape it. Labels hold account emails; this endpoint is only
 reachable from the host and the cluster.
 """
 import json
+import os
 import sqlite3
 import sys
 import threading
@@ -28,12 +29,48 @@ DB = HOME / ".local/share/cpa-manager-plus/usage.sqlite"
 STATE = HOME / ".local/share/cli-proxy-rerank/state.json"
 PLANS = HOME / ".config/cli-proxy-rerank/plans.json"
 MGMT_KEY = (HOME / ".config/cli-proxy-rerank/management-key").read_text().strip()
-# One proxy instance per provider (see cli-proxy-rerank): label value -> base URL.
-PROXIES = {"codex": "http://127.0.0.1:8317", "claude": "http://127.0.0.1:8319"}
+# Proxy instances come from the shared instance map (deploy/local/instances.example.json);
+# the built-in values apply when the file is missing.
+INSTANCES_FILE = Path(os.environ.get("CLI_PROXY_INSTANCES") or HOME / ".config/cli-proxy/instances.json")
+BUILTIN_INSTANCES = [
+    {"id": "claude-primary", "provider": "claude", "base_url": "http://127.0.0.1:8319", "management_path": "/v8/management"},
+    {"id": "codex-primary", "provider": "codex", "base_url": "http://127.0.0.1:8317", "management_path": "/v8/management"},
+]
+# Listen addresses are host-specific and stay out of the repo: ~/.config/cli-proxy/exporter.json
+# {"listen": [["127.0.0.1", 9787], ["<bridge-address>", 9787]]}. CLI_PROXY_EXPORTER_LISTEN
+# ("host:port,host:port") overrides the file; loopback only when neither is set.
+EXPORTER_FILE = Path(os.environ.get("CLI_PROXY_EXPORTER_CONFIG") or HOME / ".config/cli-proxy/exporter.json")
 DASHBOARD = "http://127.0.0.1:18317"
 # Anthropic reports some limits under internal codenames; same labels as the dashboard.
 CLAUDE_WINDOW_NAMES = {"iguana_necktie": "Fable weekly", "seven_day": "Weekly", "five_hour": "5-hour"}
-LISTEN = [("127.0.0.1", 9787), ("<bridge-address>", 9787)]
+
+
+def load_proxies():
+    """Instance map as {label: (base URL, management URL)}; the label is the provider name."""
+    try:
+        instances = json.loads(INSTANCES_FILE.read_text())["instances"]
+    except FileNotFoundError:
+        instances = BUILTIN_INSTANCES
+    proxies = {}
+    for i in instances:
+        base = i["base_url"].rstrip("/")
+        proxies[i["provider"] if i["provider"] not in proxies else i["id"]] = (
+            base, base + i.get("management_path", "/v8/management"))
+    return proxies
+
+
+def load_listen():
+    spec = os.environ.get("CLI_PROXY_EXPORTER_LISTEN")
+    if spec:
+        return [(h, int(p)) for h, _, p in (s.strip().rpartition(":") for s in spec.split(","))]
+    try:
+        return [(h, int(p)) for h, p in json.loads(EXPORTER_FILE.read_text())["listen"]]
+    except FileNotFoundError:
+        return [("127.0.0.1", 9787)]
+
+
+PROXIES = load_proxies()
+LISTEN = load_listen()
 
 
 def esc(value) -> str:
@@ -225,8 +262,8 @@ def collect_plans(m: Metrics):
 
 def collect_credentials(m: Metrics):
     files = []
-    for name, base in PROXIES.items():
-        ok, body = http_ok(f"{base}/v8/management/credentials", {"Authorization": f"Bearer {MGMT_KEY}"})
+    for name, (_, mgmt) in PROXIES.items():
+        ok, body = http_ok(f"{mgmt}/credentials", {"Authorization": f"Bearer {MGMT_KEY}"})
         if not ok:
             raise RuntimeError(f"{name} proxy credentials unreadable")
         files += json.loads(body).get("files", [])
@@ -242,7 +279,7 @@ def collect_credentials(m: Metrics):
 def render() -> str:
     m = Metrics()
     up_dash, _ = http_ok(f"{DASHBOARD}/management.html")
-    for name, base in PROXIES.items():
+    for name, (base, _) in PROXIES.items():
         up_proxy, _ = http_ok(f"{base}/healthz")
         m.add("cliproxy_up", "gauge", "Service reachable.", 1 if up_proxy else 0, service="proxy", proxy=name)
     m.add("cliproxy_up", "gauge", "Service reachable.", 1 if up_dash else 0, service="dashboard")
