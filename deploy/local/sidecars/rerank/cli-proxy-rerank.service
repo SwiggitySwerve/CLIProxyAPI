@@ -1,0 +1,7 @@
+[Unit]
+Description=Re-rank CLIProxyAPI accounts by soonest weekly quota reset
+After=cli-proxy-api.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/bin/cli-proxy-rerank

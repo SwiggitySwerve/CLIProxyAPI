@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""Re-rank CLIProxyAPI credentials so the account whose weekly quota resets
+soonest is used first (use-it-or-lose-it), per provider.
+
+Pairs with routing.strategy=fill-first: the proxy always uses the highest
+`priority` credential that is available, and fails over down the list on
+429/5xx (routing.retry.request-retry > 0).
+
+Accounts that are limited right now, or whose quota can't be read, sink to the
+bottom so they're only used as a last resort.
+"""
+import json
+import sys
+import time
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+# One proxy instance per provider: Codex/GPT accounts on :8317, Claude accounts on :8319.
+BASES = ("http://127.0.0.1:8317/v8/management", "http://127.0.0.1:8319/v8/management")
+KEY = (Path.home() / ".config/cli-proxy-rerank/management-key").read_text().strip()
+AUTH_DIR = Path.home() / ".local/share/cli-proxy-api/auth"
+TOP = 100  # priority of the first-choice account; each next one is 10 lower
+DRY_RUN = "--dry-run" in sys.argv
+# Last ranking, read by the Prometheus exporter (cli-proxy-exporter).
+STATE = Path.home() / ".local/share/cli-proxy-rerank/state.json"
+
+
+def mgmt(base, method, path, body=None):
+    req = urllib.request.Request(
+        base + path,
+        method=method,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Authorization": f"Bearer {KEY}", "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.load(resp)
+
+
+def upstream(cred, url, headers):
+    headers = {"Authorization": "Bearer $TOKEN$", **headers}
+    r = mgmt(cred["_base"], "POST", "/requests/api-call",
+             {"auth_index": cred["auth_index"], "method": "GET", "url": url, "header": headers})
+    if r.get("status_code") != 200:
+        raise RuntimeError(f"upstream HTTP {r.get('status_code')}")
+    return json.loads(r["body"])
+
+
+def codex_quota(cred):
+    account_id = json.loads((AUTH_DIR / cred["name"]).read_text()).get("account_id", "")
+    u = upstream(cred, "https://chatgpt.com/backend-api/wham/usage",
+                 {"Chatgpt-Account-Id": account_id, "User-Agent": "codex-tui/0.149.1"})
+    rl = u.get("rate_limit") or {}
+    windows = [w for w in (rl.get("primary_window"), rl.get("secondary_window")) if w]
+    if not windows:
+        raise RuntimeError("no rate-limit windows")
+    weekly = max(windows, key=lambda w: w.get("limit_window_seconds") or 0)
+    limited = rl.get("limit_reached") or not rl.get("allowed", True) or any(
+        (w.get("used_percent") or 0) >= 100 for w in windows)
+    reset = datetime.fromtimestamp(weekly["reset_at"], timezone.utc)
+    EXTRAS[cred.get("email")] = codex_extras(u)
+    return reset, weekly.get("used_percent"), limited
+
+
+def claude_quota(cred):
+    u = upstream(cred, "https://api.anthropic.com/api/oauth/usage",
+                 {"anthropic-beta": "oauth-2025-04-20", "User-Agent": "claude-cli/2.1.280 (external, cli)"})
+    weekly = u["seven_day"]
+    limited = any((w or {}).get("utilization", 0) >= 100 for w in (u.get("five_hour"), weekly))
+    reset = datetime.fromisoformat(weekly["resets_at"])
+    EXTRAS[cred.get("email")] = claude_extras(u)
+    return reset, weekly.get("utilization"), limited
+
+
+PROBES = {"codex": codex_quota, "claude": claude_quota}
+
+# Credit / spend-limit details captured as a side effect of the same usage calls,
+# keyed by account email, for the exporter (no extra upstream requests).
+EXTRAS = {}
+
+
+def _num(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def codex_extras(u):
+    credits = u.get("credits") or {}
+    local = credits.get("approx_local_messages") or [None, None]
+    cloud = credits.get("approx_cloud_messages") or [None, None]
+    resets = u.get("rate_limit_reset_credits") or {}
+    return {
+        "credits_balance": _num(credits.get("balance")),
+        "credits_has": credits.get("has_credits"),
+        "credits_unlimited": credits.get("unlimited"),
+        "credits_overage_reached": credits.get("overage_limit_reached"),
+        "credits_approx_local_messages": [_num(x) for x in local[:2]],
+        "credits_approx_cloud_messages": [_num(x) for x in cloud[:2]],
+        "reset_credits_available": resets.get("available_count"),
+    }
+
+
+def claude_extras(u):
+    limits = []
+    for key, window in u.items():
+        if isinstance(window, dict) and window.get("limit_dollars") is not None:
+            limits.append({"window": key, "limit_usd": _num(window.get("limit_dollars")),
+                           "used_usd": _num(window.get("used_dollars")),
+                           "remaining_usd": _num(window.get("remaining_dollars")),
+                           "resets_at": window.get("resets_at")})
+    extra = u.get("extra_usage") or {}
+    return {
+        "spend_limits": limits,
+        "extra_usage_enabled": extra.get("is_enabled"),
+        # extra_usage amounts are reported in cents
+        "extra_usage_monthly_limit_usd": (_num(extra.get("monthly_limit")) or 0) / 100 if extra.get("monthly_limit") is not None else None,
+        "extra_usage_used_usd": (_num(extra.get("used_credits")) or 0) / 100 if extra.get("used_credits") is not None else None,
+    }
+
+
+def main():
+    creds = []
+    for base in BASES:
+        for c in mgmt(base, "GET", "/credentials")["files"]:
+            creds.append({**c, "_base": base})
+    by_provider = {}
+    for c in creds:
+        if c.get("provider") in PROBES and not c.get("disabled"):
+            by_provider.setdefault(c["provider"], []).append(c)
+
+    state = {"updated_at": time.time(), "accounts": []}
+    for provider, group in sorted(by_provider.items()):
+        ranked = []
+        for c in group:
+            try:
+                reset, used, limited = PROBES[provider](c)
+            except Exception as e:  # unreadable quota: keep as last resort
+                print(f"{provider}: {c['email']}: quota check failed: {e}", file=sys.stderr)
+                reset, used, limited = datetime.max.replace(tzinfo=timezone.utc), None, True
+            ranked.append((limited, reset, c["email"], used, c))
+        ranked.sort(key=lambda r: r[:3])
+
+        for i, (limited, reset, email, used, c) in enumerate(ranked):
+            prio = max(TOP - 10 * i, 1)
+            note = "LIMITED" if limited else f"{used}% used"
+            when = "unknown" if reset.year == 9999 else reset.astimezone().strftime("%a %b %d %H:%M")
+            changed = c.get("priority") != prio
+            print(f"{provider}: #{i + 1} {email:28} resets {when}  {note:>9}  priority {prio}"
+                  + ("" if not changed else f" (was {c.get('priority')})"))
+            if changed and not DRY_RUN:
+                mgmt(c["_base"], "PATCH", "/credentials/fields", {"name": c["name"], "priority": prio})
+            state["accounts"].append({
+                "provider": provider, "account": email, "rank": i + 1, "priority": prio,
+                "limited": bool(limited), "used_percent": used,
+                "reset_at": None if reset.year == 9999 else reset.timestamp(),
+                **EXTRAS.get(email, {}),
+            })
+    if not DRY_RUN:
+        STATE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = STATE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state))
+        tmp.replace(STATE)
+
+
+if __name__ == "__main__":
+    main()
