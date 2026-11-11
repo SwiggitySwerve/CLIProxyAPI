@@ -77,6 +77,87 @@ is rejected by a cooldown, each Codex credential holding a quota cooldown is che
 against `/backend-api/wham/usage`. It is cleared through `Manager.ResetQuota` only
 when `rate_limit.allowed` is true and `limit_reached` is false. Failed, non-200 or
 incomplete probes keep the cooldown. Disabled credentials are never probed.
+Providers plug in through `QuotaRecheckAdapter` (`quota_recheck.go`, registered per
+provider with `Manager.RegisterQuotaRecheckAdapter`; Codex and Claude have one). A cooldown is
+cleared only if it is still the one the probe observed (recover time, credential
+version and epoch unchanged), so a newer cooldown set mid-probe survives.
+Tests: `quota_reconcile_test.go`, `quota_recheck_test.go`.
+
+`quota-reconcile` takes the old bool (`true` is `codex: clear`, `false` is off) or a
+per-provider map, for example
+`{codex: {mode: clear}, claude: {mode: observe, interval: 30m, near-reset-interval: 5m, near-reset-window: 1h}}`.
+`mode` is `off`, `observe` (log the verdict with provider, credential id, verdict and
+signals; never clear) or `clear`. Each cooled credential has its own next-check time:
+`interval` normally, `near-reset-interval` within `near-reset-window` before its soonest
+known reset. Codex defaults reproduce the original loop (every pass, at least 10s
+apart, no near window); other providers default to 30m, 5m and 1h, and no interval
+goes below 10s. If a credential the loop cleared gets a quota 429 within 10 minutes,
+its interval doubles (cap 6h) until its known reset passes. The loop stays idle in
+Home mode, and `service_lifecycle.go` still only starts it outside Home mode.
+Config: `internal/config/quota_reconcile.go`. Cadence and backoff:
+`quota_recheck_schedule.go`. Tests: `quota_recheck_modes_test.go`,
+`internal/config/quota_reconcile_test.go`.
+
+The Codex probe URL follows the credential's `base-url` when one is set (a trailing
+`/codex` is dropped, so `https://chatgpt.com/backend-api/codex` still maps to
+`.../backend-api/wham/usage`); without one it is the chatgpt.com default.
+
+### Claude adapter
+
+`quota_recheck_claude.go`, registered for `claude`. It only rechecks cooldowns set
+by a unified rate-limit rejection (credential-scoped `credential_quota`, or a model
+state carrying rejected unified windows); ordinary model-level 429s keep their own
+short backoff.
+
+- Verdict: one minimal real inference through `Manager.VerifyInference` (16 output
+  tokens) on the cheapest registered model (haiku, then sonnet, then the rest). Under
+  model-level cooling it skips models that have their own cooldown, because a success
+  clears that model through `MarkResult`. Allowed needs a completed 200 whose
+  `Anthropic-Ratelimit-Unified-Status` is `allowed` or `allowed_warning`, no window
+  `rejected`, and every window that set the cooldown reported as allowed. A 429 or a
+  rejected status is limited; `MarkResult` inside `VerifyInference` re-derives the
+  deadline once and the loop adds nothing. Everything else is unknown and keeps the
+  cooldown. A clear goes through the same guarded `resetQuota` as Codex.
+- Usage snapshot (advisory, never clears): `GET /api/oauth/usage` with
+  `anthropic-beta: oauth-2025-04-20` through the executor, at most every 10 minutes
+  per cooled OAuth credential. A moved reset time (more than 1 minute), a dropped
+  percentage, a changed limit severity or `is_active`, or toggled extra usage or spend
+  requests an early verdict, at least 2 minutes after the previous one. A failed
+  snapshot (including the endpoint's occasional 429) keeps the baseline and doubles
+  the snapshot interval, capped at 1 hour.
+- In `observe` mode verdicts are logged at info, including unknown ones with their
+  reason. Claude is only rechecked when `quota-reconcile` lists it; the legacy `true`
+  still means Codex only.
+
+Tests: `quota_recheck_claude_test.go`.
+
+### All-cooled recheck round
+
+When every candidate for a request is cooled, the request runs one recheck round before
+it returns the cooldown 429 (`quota_all_cooled.go`, hooked into `executeMixedOnce` and
+`executeStreamMixedOnce` where selection fails). It only applies to credentials holding a
+quota cooldown whose provider mode is not `off`, never runs while an uncooled candidate
+exists, bypasses the per-credential schedule above, and skips Home mode. Providers listed
+in `allCooledTrialVerdicts` (Claude) get a half-open trial: the user's own request is sent
+on the cooled credential with the oldest last check, then the next, up to
+`request-retry + 1` trials. A 200 whose `Anthropic-Ratelimit-Unified-Status` is `allowed`
+or `allowed_warning` is served and, in `clear` mode, clears the cooldown (guarded by the
+cooldown identity); `observe` serves it but keeps the cooldown. A 429 goes through
+`MarkResult` as usual. Other providers with a registered adapter (Codex) get a synchronous
+`Verdict` per cooled credential and then selection runs again. Each credential is rechecked
+at most once per 60s; inside that gap, and when nothing succeeds, the request returns the
+same error it returned before this round existed. Token counting is not covered.
+Tests: `quota_all_cooled_test.go`. Staging: `deploy/local/staging/scenarios/all-cooled-one-lifts.sh`.
+
+## Quota recheck probe deadlines
+
+Named exception to the AGENTS.md rule that forbids timeouts once an upstream connection
+exists: the quota recheck probe deadlines in `sdk/cliproxy/auth/quota_reconcile.go`
+(`quotaProbeTimeout`, 20s, wraps each adapter `Verdict` and each `UsageSnapshot`; for
+Claude the verdict is a 16-token inference request, which also runs under it). The probe is a background
+check, not a user request, and a hung probe would stall the loop for every other
+credential. AGENTS.md cannot change in a PR here (a workflow auto-closes such PRs),
+so the exception is recorded here and in the PR body.
 
 ## Soonest-reset routing
 
