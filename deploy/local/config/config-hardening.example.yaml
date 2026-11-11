@@ -1,0 +1,21 @@
+# The keys apply-config.sh sets, shown in the v8 nested layout. This is a fragment, not a
+# complete config: merge it into each instance's config.yaml (the script does that for you).
+# It holds no secrets, and live config files must never be committed.
+routing:
+  cooldown:
+    # Persist cooldowns to one .cds file per credential in the auth dir, and restore them at
+    # startup (roadmap 1.5).
+    save-cooldown-status: true
+    # Left unchanged by apply-config.sh (roadmap 1.6). Target once PRs #2/#5 are deployed:
+    #   quota-reconcile:
+    #     codex: {mode: clear}
+    #     claude: {mode: observe}
+    quota-reconcile: true
+observability:
+  logs:
+    # Number of error-*.log files kept (default 10, 0 disables the cleanup) (roadmap 1.4).
+    error-logs-max-files: 500
+    # Cap on the total size of ALL *.log files in the logs dir. The oldest files go first,
+    # error logs included, so this must leave room for error-logs-max-files error logs.
+    # (default 0 = no cap; the instances run with 100)
+    logs-max-total-size-mb: 1536
