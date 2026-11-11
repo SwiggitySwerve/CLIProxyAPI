@@ -14,8 +14,14 @@ which credential may serve it.
 ## Behavior
 
 - Requests with `service_tier=ultrafast` may only be served by a `codex`
-  credential whose `Metadata["email"]` equals `ultrafastAccountEmail`
-  (`sdk/cliproxy/auth/service_tier_account.go`, currently `research@astrabit.io`).
+  credential listed under `routing.ultrafast` in config
+  (`sdk/cliproxy/auth/service_tier_account.go`). A credential matches when its
+  Codex `account_id` (auth file metadata) is in `account-ids`, its credential id
+  (the auth file name) is in `auth-ids`, or its `email` metadata is in `emails`.
+  Prefer `account-ids`; `emails` is a fallback and is used only when listed.
+- **Unset means denied.** If `routing.ultrafast` is missing or every list is empty,
+  ultrafast is denied for every credential (fail closed). The operator must set the
+  key before rolling out a build with this change, or ultrafast stops working.
 - Every other tier is unchanged.
 - Selection skips ineligible credentials (`authSelectionEligibility.allows`).
 - A final-payload and routing-hint guard (`helps.ValidateCodexServiceTier`,
@@ -35,8 +41,17 @@ turns into a hard ultrafast outage until it is cleared with
 
 ## Changing the account
 
-`ultrafastAccountEmail` is a compile-time constant and the tests hard-code the
-same address. Update both when moving the entitlement.
+The entitlement lives in config, not in source; no rebuild is needed to move it.
+Edit `routing.ultrafast` in `config.yaml` (applied on config reload; the policy is replaced
+on every reload, so removing an entry revokes it immediately):
+
+    routing:
+      ultrafast:
+        account-ids: ["<codex-account-id>"]
+
+The value for `account-ids` is the `account_id` field in the target Codex auth
+file. Read it from the auth file itself, or from the credential listing, and do
+not paste it into commits, issues or PR text.
 
 ## Verification (v8.0.65, golang:1.26-bookworm)
 

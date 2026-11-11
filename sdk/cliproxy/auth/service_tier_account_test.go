@@ -2,37 +2,105 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
+const (
+	testUltrafastAccountID = "acct-ultrafast-0001"
+	testOtherAccountID     = "acct-other-0002"
+	testUltrafastEmail     = "ultrafast-holder@example.test"
+	testOtherEmail         = "other-holder@example.test"
+)
+
+// useUltrafastPolicy installs a policy for one test and restores the
+// fail-closed default afterwards.
+func useUltrafastPolicy(t *testing.T, cfg internalconfig.UltrafastConfig) {
+	t.Helper()
+	SetUltrafastPolicy(cfg)
+	t.Cleanup(func() { SetUltrafastPolicy(internalconfig.UltrafastConfig{}) })
+}
+
+func ultrafastTestAuth(id, accountID, email string) *Auth {
+	return &Auth{ID: id, Provider: "codex", Metadata: map[string]any{"account_id": accountID, "email": email}}
+}
+
 func TestUltrafastAccountPolicy(t *testing.T) {
+	byAccount := internalconfig.UltrafastConfig{AccountIDs: []string{testUltrafastAccountID}}
 	for _, tc := range []struct {
-		name, provider, email, tier string
-		allowed                     bool
+		name     string
+		policy   internalconfig.UltrafastConfig
+		provider string
+		id       string
+		account  string
+		email    string
+		tier     string
+		allowed  bool
 	}{
-		{"research", "codex", "research@astrabit.io", "ultrafast", true},
-		{"normalized", "codex", " RESEARCH@astrabit.io ", " ULTRAFAST ", true},
-		{"other account", "codex", "wrollings@astrabit.io", "ultrafast", false},
-		{"missing identity", "codex", "", "ultrafast", false},
-		{"other provider", "claude", "research@astrabit.io", "ultrafast", false},
-		{"default unchanged", "codex", "wrollings@astrabit.io", "default", true},
-		{"priority unchanged", "codex", "wrollings@astrabit.io", "priority", true},
+		{"configured account id", byAccount, "codex", "a", testUltrafastAccountID, "", "ultrafast", true},
+		{"normalized", internalconfig.UltrafastConfig{AccountIDs: []string{" ACCT-Ultrafast-0001 "}}, "codex", "a", testUltrafastAccountID, "", " ULTRAFAST ", true},
+		{"other account", byAccount, "codex", "a", testOtherAccountID, "", "ultrafast", false},
+		{"missing identity", byAccount, "codex", "a", "", "", "ultrafast", false},
+		{"other provider", byAccount, "claude", "a", testUltrafastAccountID, "", "ultrafast", false},
+		{"configured auth id", internalconfig.UltrafastConfig{AuthIDs: []string{"codex-ultrafast.json"}}, "codex", "codex-ultrafast.json", testOtherAccountID, "", "ultrafast", true},
+		{"other auth id", internalconfig.UltrafastConfig{AuthIDs: []string{"codex-ultrafast.json"}}, "codex", "codex-other.json", testUltrafastAccountID, "", "ultrafast", false},
+		{"configured email", internalconfig.UltrafastConfig{Emails: []string{testUltrafastEmail}}, "codex", "a", testOtherAccountID, " ULTRAFAST-holder@example.test ", "ultrafast", true},
+		{"email ignored unless configured", byAccount, "codex", "a", testOtherAccountID, testUltrafastEmail, "ultrafast", false},
+		{"unset denies account id", internalconfig.UltrafastConfig{}, "codex", "a", testUltrafastAccountID, testUltrafastEmail, "ultrafast", false},
+		{"blank entries never match", internalconfig.UltrafastConfig{AccountIDs: []string{" "}, AuthIDs: []string{""}, Emails: []string{""}}, "codex", "", "", "", "ultrafast", false},
+		{"default unchanged when unset", internalconfig.UltrafastConfig{}, "codex", "a", testOtherAccountID, "", "default", true},
+		{"priority unchanged when unset", internalconfig.UltrafastConfig{}, "codex", "a", testOtherAccountID, "", "priority", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			a := &Auth{Provider: tc.provider, Metadata: map[string]any{"email": tc.email}}
+			useUltrafastPolicy(t, tc.policy)
+			a := &Auth{ID: tc.id, Provider: tc.provider, Metadata: map[string]any{"account_id": tc.account, "email": tc.email}}
 			if err := ValidateServiceTierAccount(a, tc.tier); (err == nil) != tc.allowed {
 				t.Fatalf("allowed=%t, error=%v", tc.allowed, err)
 			}
 		})
 	}
+	useUltrafastPolicy(t, byAccount)
 	if ValidateServiceTierAccount(nil, "ultrafast") == nil {
 		t.Fatal("missing credential must reject ultrafast")
+	}
+}
+
+func TestUltrafastDenialIsRequestScoped403(t *testing.T) {
+	for name, policy := range map[string]internalconfig.UltrafastConfig{
+		"other credential": {AccountIDs: []string{testUltrafastAccountID}},
+		"unset":            {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			useUltrafastPolicy(t, policy)
+			err := ValidateServiceTierAccount(ultrafastTestAuth("x", testOtherAccountID, testOtherEmail), "ultrafast")
+			var authErr *Error
+			if !errors.As(err, &authErr) || authErr.Code != ErrorCodeRequestScoped || authErr.HTTPStatus != http.StatusForbidden {
+				t.Fatalf("want request-scoped 403, got %#v", err)
+			}
+			if strings.Contains(err.Error(), testOtherAccountID) || strings.Contains(err.Error(), testUltrafastAccountID) {
+				t.Fatalf("denial message leaks an identity: %v", err)
+			}
+		})
+	}
+}
+
+func TestSetUltrafastPolicyReplacesPreviousPolicy(t *testing.T) {
+	useUltrafastPolicy(t, internalconfig.UltrafastConfig{AccountIDs: []string{testUltrafastAccountID}})
+	a := ultrafastTestAuth("x", testUltrafastAccountID, "")
+	if ValidateServiceTierAccount(a, "ultrafast") != nil {
+		t.Fatal("configured credential must be allowed")
+	}
+	SetUltrafastPolicy(internalconfig.UltrafastConfig{AccountIDs: []string{testOtherAccountID}})
+	if ValidateServiceTierAccount(a, "ultrafast") == nil {
+		t.Fatal("a reload must revoke the previous entitlement")
 	}
 }
 
@@ -40,10 +108,11 @@ func TestUltrafastFinalPolicyFailureKeepsCredentialHealthy(t *testing.T) {
 	for _, streaming := range []bool{false, true} {
 		t.Run(map[bool]string{false: "http", true: "stream"}[streaming], func(t *testing.T) {
 			model := "ultrafast-final-policy-" + uuid.NewString()
+			useUltrafastPolicy(t, internalconfig.UltrafastConfig{AccountIDs: []string{testUltrafastAccountID}})
 			m := NewManager(nil, &FillFirstSelector{}, nil)
 			m.SetRetryConfig(0, 0, 0)
-			other := &Auth{ID: "other-" + model, Provider: "codex", Metadata: map[string]any{"email": "wrollings@astrabit.io", "priority": 200}}
-			research := &Auth{ID: "research-" + model, Provider: "codex", Metadata: map[string]any{"email": ultrafastAccountEmail, "priority": 100}}
+			other := &Auth{ID: "other-" + model, Provider: "codex", Metadata: map[string]any{"account_id": testOtherAccountID, "priority": 200}}
+			research := &Auth{ID: "research-" + model, Provider: "codex", Metadata: map[string]any{"account_id": testUltrafastAccountID, "priority": 100}}
 			failure := ValidateServiceTierAccount(other, "ultrafast")
 			e := &authFallbackExecutor{id: "codex", executeErrors: map[string]error{other.ID: failure}, streamFirstErrors: map[string]error{other.ID: failure}}
 			m.RegisterExecutor(e)
@@ -97,15 +166,20 @@ func TestUltrafastSelectionAndFallback(t *testing.T) {
 	}
 	for name, makeSelector := range selectors {
 		for _, streaming := range []bool{false, true} {
-			for _, scenario := range []string{"eligible", "disabled", "missing", "cooldown", "pinned-other", "quota", "default"} {
+			for _, scenario := range []string{"eligible", "disabled", "missing", "cooldown", "pinned-other", "quota", "default", "unset"} {
 				t.Run(name+"/"+scenario+"/"+map[bool]string{false: "http", true: "stream"}[streaming], func(t *testing.T) {
+					policy := internalconfig.UltrafastConfig{AccountIDs: []string{testUltrafastAccountID}}
+					if scenario == "unset" {
+						policy = internalconfig.UltrafastConfig{}
+					}
+					useUltrafastPolicy(t, policy)
 					model := "ultrafast-test-" + uuid.NewString()
 					m := NewManager(nil, makeSelector(), nil)
 					m.SetRetryConfig(0, 0, 0)
 					e := &authFallbackExecutor{id: "codex"}
 					m.RegisterExecutor(e)
-					other := &Auth{ID: "other-" + model, Provider: "codex", Metadata: map[string]any{"email": "wrollings@astrabit.io", "priority": 200}}
-					research := &Auth{ID: "research-" + model, Provider: "codex", Metadata: map[string]any{"email": ultrafastAccountEmail, "priority": 100}}
+					other := &Auth{ID: "other-" + model, Provider: "codex", Metadata: map[string]any{"account_id": testOtherAccountID, "priority": 200}}
+					research := &Auth{ID: "research-" + model, Provider: "codex", Metadata: map[string]any{"account_id": testUltrafastAccountID, "priority": 100}}
 					if scenario == "disabled" {
 						research.Disabled = true
 					}
