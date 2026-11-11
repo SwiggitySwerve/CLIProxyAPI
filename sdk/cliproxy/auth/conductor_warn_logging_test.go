@@ -724,35 +724,13 @@ func (e *mockStreamErrorExecutor) HttpRequest(ctx context.Context, auth *Auth, r
 	return nil, errors.New("not implemented")
 }
 
-type unavailableLogExecutor struct{}
-
-func (unavailableLogExecutor) Identifier() string { return "claude" }
-
-func (unavailableLogExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	return cliproxyexecutor.Response{}, errors.New("unexpected upstream call")
-}
-
-func (unavailableLogExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
-	return nil, errors.New("unexpected upstream call")
-}
-
-func (unavailableLogExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) { return auth, nil }
-
-func (unavailableLogExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	return cliproxyexecutor.Response{}, errors.New("unexpected upstream call")
-}
-
-func (unavailableLogExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
-	return nil, errors.New("unexpected upstream call")
-}
-
 // When every remaining candidate is cooled, the warning must also say which
 // credentials were left out before the cooldown check: a disabled credential
 // otherwise reads as "1 of 1 candidate(s) are in cooldown".
 func TestWarnLogAuthUnavailableCountsExcludedCredentials(t *testing.T) {
 	model := "warn-excluded-" + t.Name()
 	manager := NewManager(nil, nil, nil)
-	manager.RegisterExecutor(unavailableLogExecutor{})
+	manager.RegisterExecutor(&mockStreamErrorExecutor{identifier: "claude"})
 	for _, auth := range []*Auth{
 		{ID: "claude-cooled", Provider: "claude", Status: StatusActive},
 		{ID: "claude-disabled", Provider: "claude", Status: StatusDisabled, Disabled: true},
