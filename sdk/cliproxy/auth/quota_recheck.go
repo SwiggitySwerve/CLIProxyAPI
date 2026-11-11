@@ -78,6 +78,15 @@ type QuotaRecheckAdapter interface {
 	Verdict(ctx context.Context, host QuotaRecheckHost, auth *Auth) (QuotaVerdict, error)
 }
 
+// quotaSnapshotTrigger is implemented by adapters whose UsageSnapshot is its own
+// upstream call. The loop polls it on snapshotInterval for cooled credentials
+// and runs an early Verdict when snapshotChanged reports a relevant change
+// between two snapshots.
+type quotaSnapshotTrigger interface {
+	snapshotInterval() time.Duration
+	snapshotChanged(prev, next map[string]string) bool
+}
+
 // RegisterQuotaRecheckAdapter registers adapter for its provider, replacing any
 // earlier one. Providers without an adapter are never rechecked.
 func (m *Manager) RegisterQuotaRecheckAdapter(adapter QuotaRecheckAdapter) {

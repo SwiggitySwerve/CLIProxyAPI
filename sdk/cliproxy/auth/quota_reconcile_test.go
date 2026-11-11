@@ -16,6 +16,7 @@ type usageProbeExecutor struct {
 	body   string
 	status int
 	calls  int
+	urls   []string
 }
 
 func (e *usageProbeExecutor) Identifier() string { return "codex" }
@@ -29,8 +30,9 @@ func (e *usageProbeExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, erro
 func (e *usageProbeExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	return cliproxyexecutor.Response{}, nil
 }
-func (e *usageProbeExecutor) HttpRequest(_ context.Context, _ *Auth, _ *http.Request) (*http.Response, error) {
+func (e *usageProbeExecutor) HttpRequest(_ context.Context, _ *Auth, req *http.Request) (*http.Response, error) {
 	e.calls++
+	e.urls = append(e.urls, req.URL.String())
 	return &http.Response{StatusCode: e.status, Body: io.NopCloser(strings.NewReader(e.body))}, nil
 }
 
