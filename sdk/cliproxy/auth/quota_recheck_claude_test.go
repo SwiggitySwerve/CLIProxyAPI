@@ -355,6 +355,20 @@ func TestClaudeRecheckGenerationGuardHolds(t *testing.T) {
 	}
 }
 
+// A rejection during the probe that leaves the existing, later deadline in
+// place still makes the probe's verdict stale.
+func TestClaudeRecheckGenerationGuardHoldsWhenDeadlineUnchanged(t *testing.T) {
+	manager, exec, _ := newClaudeRecheckManager(t, internalconfig.QuotaReconcileClear)
+	exec.headers = claudeAllowedWarning
+	exec.during = func() { coolClaude(t, manager, "claude-recheck", time.Hour) }
+
+	manager.reconcileQuotaCooldowns(context.Background())
+
+	if !claudeCooled(t, manager) {
+		t.Fatalf("a rejection during the probe was ignored because it kept the deadline")
+	}
+}
+
 // An ordinary model-level 429 is not a unified window rejection; the adapter
 // leaves it to its short backoff and spends no probe on it.
 func TestClaudeRecheckSkipsNonUnifiedCooldown(t *testing.T) {

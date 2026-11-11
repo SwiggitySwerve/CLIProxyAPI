@@ -111,16 +111,18 @@ func (m *Manager) quotaRecheckAdapter(provider string) QuotaRecheckAdapter {
 var errQuotaCooldownChanged = errors.New("quota cooldown changed since it was observed")
 
 // quotaCooldownIdentity identifies one cooldown episode of a credential. A new
-// quota rejection stores a new recovery time, and a replaced credential changes
-// its version or epoch, so either makes an earlier observation stale.
+// quota rejection bumps the rejection count (and usually the recovery time),
+// and a replaced credential changes its version or epoch, so any of them makes
+// an earlier observation stale.
 type quotaCooldownIdentity struct {
-	epoch     uint64
-	version   uint64
-	recoverAt string
+	epoch      uint64
+	version    uint64
+	rejections uint64
+	recoverAt  string
 }
 
 func newQuotaCooldownIdentity(auth *Auth) quotaCooldownIdentity {
-	id := quotaCooldownIdentity{epoch: auth.RegistrationEpoch, version: auth.CredentialVersion}
+	id := quotaCooldownIdentity{epoch: auth.RegistrationEpoch, version: auth.CredentialVersion, rejections: auth.quotaRejections}
 	var b strings.Builder
 	b.WriteString(strconv.FormatInt(auth.Quota.NextRecoverAt.UnixNano(), 10))
 	keys := make([]string, 0, len(auth.ModelStates))

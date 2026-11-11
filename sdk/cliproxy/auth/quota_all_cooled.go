@@ -25,19 +25,23 @@ const allCooledTrialGap = 60 * time.Second
 // rechecked through their registered QuotaRecheckAdapter's Verdict instead
 // (Codex today). A provider with neither is never rechecked when every
 // candidate is cooled.
-var allCooledTrialVerdicts = map[string]func(http.Header) QuotaVerdictState{
+var allCooledTrialVerdicts = map[string]func(cooled *Auth, now time.Time) func(http.Header) QuotaVerdictState{
 	"claude": claudeTrialVerdict,
 }
 
-// claudeTrialVerdict reads the unified rate-limit status of a 200 response.
-func claudeTrialVerdict(headers http.Header) QuotaVerdictState {
-	switch strings.ToLower(strings.TrimSpace(headers.Get("Anthropic-Ratelimit-Unified-Status"))) {
-	case "allowed", "allowed_warning":
-		return QuotaVerdictAllowed
-	case "rejected":
-		return QuotaVerdictLimited
-	default:
-		return QuotaVerdictUnknown
+// claudeTrialVerdict judges a 200 served on the cooled credential with the
+// Claude adapter's own checks, against the windows that set its cooldown.
+func claudeTrialVerdict(cooled *Auth, now time.Time) func(http.Header) QuotaVerdictState {
+	windows, _ := claudeCooldownRejectedWindows(cooled, now)
+	return func(headers http.Header) QuotaVerdictState {
+		signals := make(map[string]string, len(headers))
+		for key, values := range headers {
+			if len(values) > 0 {
+				signals[http.CanonicalHeaderKey(key)] = values[0]
+			}
+		}
+		state, _ := claudeSignalsVerdict(signals, windows)
+		return state
 	}
 }
 
@@ -97,9 +101,12 @@ func (r *allCooledRound) errOr(fallback error) error {
 type allCooledTrial struct {
 	authID   string
 	provider string
-	mode     internalconfig.QuotaReconcileMode
+	policy   quotaRecheckPolicy
 	identity quotaCooldownIdentity
 	verdict  func(http.Header) QuotaVerdictState
+	// knownReset is the soonest reset of the cooldown before the trial, used to
+	// book the trial in the recheck schedule when it clears.
+	knownReset time.Time
 }
 
 // allCooledNext runs after selection failed with errPick. finalErr is what the
@@ -171,11 +178,12 @@ func (m *Manager) allCooledNext(ctx context.Context, round *allCooledRound, prov
 		round.trials++
 		key := quotaRecheckProviderKey(candidate.Provider)
 		trial = &allCooledTrial{
-			authID:   candidate.ID,
-			provider: key,
-			mode:     quotaRecheckPolicyFor(cfg, key).mode,
-			identity: newQuotaCooldownIdentity(candidate),
-			verdict:  allCooledTrialVerdicts[key],
+			authID:     candidate.ID,
+			provider:   key,
+			policy:     quotaRecheckPolicyFor(cfg, key),
+			identity:   newQuotaCooldownIdentity(candidate),
+			verdict:    allCooledTrialVerdicts[key](candidate, now),
+			knownReset: soonestKnownReset(candidate, now),
 		}
 		logEntryWithRequestID(ctx).WithFields(log.Fields{"provider": key, "auth_id": candidate.ID}).
 			Info("quota recheck: every candidate is cooled, running a half-open trial on the user's request")
@@ -291,7 +299,7 @@ func (m *Manager) finishAllCooledTrial(ctx context.Context, trial *allCooledTria
 		entry.Info("quota recheck: half-open trial served without an allowed status, cooldown kept")
 		return
 	}
-	if trial.mode != internalconfig.QuotaReconcileClear {
+	if trial.policy.mode != internalconfig.QuotaReconcileClear {
 		entry.Info("quota recheck: half-open trial says usage is allowed, cooldown kept (observe mode)")
 		return
 	}
@@ -306,6 +314,8 @@ func (m *Manager) finishAllCooledTrial(ctx context.Context, trial *allCooledTria
 		entry.Warnf("quota recheck: reset after half-open trial failed: %v", errReset)
 		return
 	}
+	schedule := &m.quotaReconcile.schedule
+	schedule.noteTrialCleared(trial.authID, schedule.now(), trial.policy, trial.knownReset)
 	entry.Info("quota recheck: half-open trial says usage is allowed, cleared stale quota cooldown")
 }
 

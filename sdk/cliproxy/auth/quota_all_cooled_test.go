@@ -48,6 +48,8 @@ type allCooledExecutor struct {
 	mu       sync.Mutex
 	lifted   map[string]bool
 	calls    map[string]int
+	// served overrides the headers of a lifted credential's 200.
+	served http.Header
 }
 
 func newAllCooledExecutor(provider string) *allCooledExecutor {
@@ -61,11 +63,24 @@ func (e *allCooledExecutor) attempt(ctx context.Context, id string) bool {
 	defer e.mu.Unlock()
 	e.calls[id]++
 	if e.lifted[id] {
-		internallogging.SetResponseHeaders(ctx, allowedClaudeHeaders())
+		internallogging.SetResponseHeaders(ctx, e.servedHeadersLocked())
 		return true
 	}
 	internallogging.SetResponseHeaders(ctx, rejectedClaudeHeaders())
 	return false
+}
+
+func (e *allCooledExecutor) servedHeadersLocked() http.Header {
+	if e.served != nil {
+		return e.served.Clone()
+	}
+	return allowedClaudeHeaders()
+}
+
+func (e *allCooledExecutor) servedHeaders() http.Header {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.servedHeadersLocked()
 }
 
 func (e *allCooledExecutor) lift(id string) {
@@ -82,7 +97,7 @@ func (e *allCooledExecutor) callCount(id string) int {
 
 func (e *allCooledExecutor) Execute(ctx context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	if e.attempt(ctx, auth.ID) {
-		return cliproxyexecutor.Response{Payload: []byte(`{"served_by":"` + auth.ID + `"}`), Headers: allowedClaudeHeaders()}, nil
+		return cliproxyexecutor.Response{Payload: []byte(`{"served_by":"` + auth.ID + `"}`), Headers: e.servedHeaders()}, nil
 	}
 	return cliproxyexecutor.Response{}, &allCooledQuotaError{retryAfter: 100 * time.Hour}
 }
@@ -94,7 +109,7 @@ func (e *allCooledExecutor) ExecuteStream(ctx context.Context, auth *Auth, _ cli
 	if e.attempt(ctx, auth.ID) {
 		ch <- cliproxyexecutor.StreamChunk{Payload: []byte("data: served_by " + auth.ID + "\n\n")}
 		close(ch)
-		return &cliproxyexecutor.StreamResult{Headers: allowedClaudeHeaders(), Chunks: ch}, nil
+		return &cliproxyexecutor.StreamResult{Headers: e.servedHeaders(), Chunks: ch}, nil
 	}
 	ch <- cliproxyexecutor.StreamChunk{Err: &allCooledQuotaError{retryAfter: 100 * time.Hour}}
 	close(ch)
@@ -216,6 +231,64 @@ func TestAllCooledTrialServesLiftedCredentialAndClearsCooldown(t *testing.T) {
 	}
 	if got := f.executor.callCount("claude-a"); got != callsA {
 		t.Fatalf("claude-a trialled while claude-b was healthy (calls %d -> %d)", callsA, got)
+	}
+}
+
+// A 200 is not enough to clear: overage can serve a request while the window
+// that set the cooldown stays rejected, and a response that omits that window
+// says nothing about it.
+func TestAllCooledTrialKeepsCooldownUnlessCooldownWindowAllowed(t *testing.T) {
+	cases := map[string]http.Header{
+		"7d still rejected": {
+			"Anthropic-Ratelimit-Unified-Status":    {"allowed"},
+			"Anthropic-Ratelimit-Unified-7d-Status": {"rejected"},
+		},
+		"7d missing": {
+			"Anthropic-Ratelimit-Unified-Status": {"allowed"},
+		},
+	}
+	for name, served := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newAllCooledFixture(t, nil, internalconfig.QuotaReconcileClear, "claude-a")
+			f.cool(t, "claude-a")
+			f.executor.served = served
+			f.executor.lift("claude-a")
+
+			if _, err := f.execute(cliproxyexecutor.Options{}); err != nil {
+				t.Fatalf("Execute error = %v, want the trial served", err)
+			}
+			if !f.cooled("claude-a") {
+				t.Fatal("cooldown cleared although the window that set it was not reported allowed")
+			}
+		})
+	}
+}
+
+// A clear by a half-open trial counts as a check: a quota 429 soon after it
+// backs off the next recheck, as after a clear by the loop.
+func TestAllCooledTrialClearFeedsFlapBackoff(t *testing.T) {
+	f := newAllCooledFixture(t, nil, internalconfig.QuotaReconcileClear, "claude-a")
+	f.cool(t, "claude-a")
+	f.executor.lift("claude-a")
+	if _, err := f.execute(cliproxyexecutor.Options{}); err != nil {
+		t.Fatalf("Execute error = %v, want the trial served", err)
+	}
+	if f.cooled("claude-a") {
+		t.Fatal("setup: trial did not clear the cooldown")
+	}
+
+	f.clock.advance(time.Minute)
+	f.cool(t, "claude-a")
+
+	schedule := &f.manager.quotaReconcile.schedule
+	schedule.mu.Lock()
+	st := schedule.states["claude-a"]
+	schedule.mu.Unlock()
+	if st == nil || st.backoffLevel != 1 {
+		t.Fatalf("backoff level after a flap = %+v, want 1", st)
+	}
+	if want := st.probedAt.Add(backedOffInterval(st.baseInterval, 1)); !st.nextCheck.Equal(want) || st.baseInterval <= 0 {
+		t.Fatalf("next check = %v (base %v), want %v from a booked trial", st.nextCheck, st.baseInterval, want)
 	}
 }
 

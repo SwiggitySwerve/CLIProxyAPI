@@ -984,6 +984,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		now = time.Now()
 		if !result.Success && statusCodeFromResult(result.Error) == http.StatusTooManyRequests && !isTransientRateLimitResultError(result.Error) {
 			m.quotaReconcile.schedule.noteQuotaRejection(result.AuthID)
+			auth.quotaRejections++
 		}
 		responseHeaders := internallogging.GetResponseHeaders(ctx)
 		var cooldownRecordsBefore []CooldownStateRecord

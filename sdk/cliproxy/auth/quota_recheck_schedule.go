@@ -227,6 +227,19 @@ func (s *quotaRecheckSchedule) noteCleared(id string, now time.Time) {
 	st.snapshotSignals = nil
 }
 
+// noteTrialCleared records that an all-cooled half-open trial cleared id's
+// cooldown at now. The trial counts as a check: it is booked like one, so a
+// quota 429 within quotaFlapWindow backs off the next check as it does after a
+// clear by the loop.
+func (s *quotaRecheckSchedule) noteTrialCleared(id string, now time.Time, policy quotaRecheckPolicy, knownReset time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.state(id)
+	st.book(now, policy, knownReset)
+	st.lastCleared = now
+	st.snapshotSignals = nil
+}
+
 // noteQuotaRejection records a quota 429 for id. When it follows a clear by the
 // loop within quotaFlapWindow, the recheck interval doubles.
 func (s *quotaRecheckSchedule) noteQuotaRejection(id string) {

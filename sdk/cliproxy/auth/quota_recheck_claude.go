@@ -123,20 +123,32 @@ func claudeProbeVerdict(auth, updated *Auth, errProbe error, started time.Time, 
 	if len(signals) == 0 {
 		return QuotaVerdict{}, fmt.Errorf("inference probe on %s returned no rate-limit headers", model)
 	}
+	state, reason := claudeSignalsVerdict(signals, windows)
+	if state == QuotaVerdictUnknown {
+		return QuotaVerdict{}, fmt.Errorf("inference probe on %s: %s", model, reason)
+	}
+	verdict.State = state
+	return verdict, nil
+}
+
+// claudeSignalsVerdict judges the unified rate-limit signals of a completed 200.
+// Any rejected window is limited. Allowed needs an allowed unified status and
+// every window in windows (those that set the cooldown) reported as allowed:
+// a 200 alone is not enough, since overage can serve a request while a shared
+// window stays rejected. Anything else is unknown, with the reason.
+func claudeSignalsVerdict(signals map[string]string, windows []string) (QuotaVerdictState, string) {
 	if hasRejectedClaudeUnifiedSignals(signals) {
-		verdict.State = QuotaVerdictLimited
-		return verdict, nil
+		return QuotaVerdictLimited, ""
 	}
 	if status := signals["Anthropic-Ratelimit-Unified-Status"]; !claudeUnifiedStatusAllows(status) {
-		return QuotaVerdict{}, fmt.Errorf("inference probe on %s: unified status %q", model, status)
+		return QuotaVerdictUnknown, fmt.Sprintf("unified status %q", status)
 	}
 	for _, window := range windows {
 		if status := signals[claudeUnifiedWindowHeader(window, "status")]; !claudeUnifiedStatusAllows(status) {
-			return QuotaVerdict{}, fmt.Errorf("inference probe on %s: window %s that set the cooldown reported %q", model, window, status)
+			return QuotaVerdictUnknown, fmt.Sprintf("window %s that set the cooldown reported %q", window, status)
 		}
 	}
-	verdict.State = QuotaVerdictAllowed
-	return verdict, nil
+	return QuotaVerdictAllowed, ""
 }
 
 // claudeProbeCompleted reports whether VerifyInference's error still means the
