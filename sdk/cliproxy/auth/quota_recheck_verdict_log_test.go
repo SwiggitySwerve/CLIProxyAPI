@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	log "github.com/sirupsen/logrus"
@@ -89,5 +90,67 @@ func TestQuotaRecheckClearedVerdictWritesNoKeptLine(t *testing.T) {
 
 	if entries := recheckVerdictEntries(hook.AllEntries()); len(entries) != 0 {
 		t.Fatalf("a clearing verdict wrote %d kept lines", len(entries))
+	}
+}
+
+// mutatingRecheckAdapter changes the stored cooldown while its verdict runs,
+// the way a Claude probe that hits a 429 refreshes the deadline.
+type mutatingRecheckAdapter struct {
+	fakeRecheckAdapter
+	mutate func()
+}
+
+func (a *mutatingRecheckAdapter) Verdict(ctx context.Context, host QuotaRecheckHost, auth *Auth) (QuotaVerdict, error) {
+	a.mutate()
+	return a.fakeRecheckAdapter.Verdict(ctx, host, auth)
+}
+
+func TestQuotaRecheckKeptLineReportsTheDeadlineAfterTheProbe(t *testing.T) {
+	hook := setupInfoLoggerHook(t)
+	manager, _, clock := newRecheckManager(t, claudeConfig(internalconfig.QuotaReconcileClear), QuotaVerdictLimited)
+	registerCooledAuth(t, manager, "claude-1", "claude")
+	refreshed := clock.now().Add(150 * time.Hour).UTC().Truncate(time.Second)
+	adapter := &mutatingRecheckAdapter{
+		fakeRecheckAdapter: fakeRecheckAdapter{provider: "claude", verdict: QuotaVerdict{State: QuotaVerdictLimited}},
+		mutate: func() {
+			manager.mu.Lock()
+			manager.auths["claude-1"].Quota.NextRecoverAt = refreshed
+			manager.mu.Unlock()
+		},
+	}
+	manager.RegisterQuotaRecheckAdapter(adapter)
+
+	manager.reconcileQuotaCooldowns(context.Background())
+
+	entries := recheckVerdictEntries(hook.AllEntries())
+	if len(entries) != 1 {
+		t.Fatalf("verdict lines = %d, want 1", len(entries))
+	}
+	if want := refreshed.Format(time.RFC3339); !strings.Contains(entries[0].Message, want) {
+		t.Fatalf("message %q lacks the refreshed deadline %s", entries[0].Message, want)
+	}
+}
+
+func TestQuotaRecheckKeptLineReportsAModelOnlyCooldown(t *testing.T) {
+	hook := setupInfoLoggerHook(t)
+	manager, _, clock := newRecheckManager(t, claudeConfig(internalconfig.QuotaReconcileClear), QuotaVerdictLimited)
+	modelReset := clock.now().Add(7 * time.Hour).UTC().Truncate(time.Second)
+	if _, err := manager.Register(context.Background(), &Auth{
+		ID: "claude-1", Provider: "claude", Status: StatusActive,
+		ModelStates: map[string]*ModelState{
+			"claude-haiku-test": {Quota: QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: modelReset}},
+		},
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	manager.reconcileQuotaCooldowns(context.Background())
+
+	entries := recheckVerdictEntries(hook.AllEntries())
+	if len(entries) != 1 {
+		t.Fatalf("verdict lines = %d, want 1", len(entries))
+	}
+	if want := modelReset.Format(time.RFC3339); !strings.Contains(entries[0].Message, want) {
+		t.Fatalf("message %q lacks the model deadline %s", entries[0].Message, want)
 	}
 }

@@ -138,11 +138,11 @@ func (m *Manager) recheckQuotaCooldown(ctx context.Context, adapter QuotaRecheck
 	identity := newQuotaCooldownIdentity(auth)
 	verdict, err := m.quotaRecheckVerdict(ctx, adapter, auth)
 	if err != nil {
-		logQuotaRecheckKept(auth, mode, QuotaVerdict{State: QuotaVerdictUnknown}, err.Error())
+		logQuotaRecheckKept(auth, mode, QuotaVerdict{State: QuotaVerdictUnknown}, err.Error(), m.quotaCooldownKeptUntil(auth))
 		return false
 	}
 	if mode != internalconfig.QuotaReconcileClear || verdict.State != QuotaVerdictAllowed {
-		logQuotaRecheckKept(auth, mode, verdict, "")
+		logQuotaRecheckKept(auth, mode, verdict, "", m.quotaCooldownKeptUntil(auth))
 		return false
 	}
 	_, _, errReset := m.resetQuota(ctx, auth.ID, func(current *Auth) bool {
@@ -165,8 +165,12 @@ func (m *Manager) recheckQuotaCooldown(ctx context.Context, adapter QuotaRecheck
 // every recheck shows in the log and not only the ones that clear. The verdict,
 // deadline and signals go in the message because the log formatter prints only
 // a fixed set of fields.
-func logQuotaRecheckKept(auth *Auth, mode internalconfig.QuotaReconcileMode, verdict QuotaVerdict, reason string) {
-	msg := fmt.Sprintf("quota recheck: verdict=%s, cooldown kept until %s", verdict.State, auth.Quota.NextRecoverAt.UTC().Format(time.RFC3339))
+func logQuotaRecheckKept(auth *Auth, mode internalconfig.QuotaReconcileMode, verdict QuotaVerdict, reason string, keptUntil time.Time) {
+	until := "unknown"
+	if !keptUntil.IsZero() {
+		until = keptUntil.UTC().Format(time.RFC3339)
+	}
+	msg := fmt.Sprintf("quota recheck: verdict=%s, cooldown kept until %s", verdict.State, until)
 	if verdict.Source != "" {
 		msg += " source=" + verdict.Source
 	}
@@ -182,6 +186,17 @@ func logQuotaRecheckKept(auth *Auth, mode internalconfig.QuotaReconcileMode, ver
 		fields["reason"] = reason
 	}
 	log.WithFields(fields).Info(msg)
+}
+
+// quotaCooldownKeptUntil returns the soonest live quota reset of auth as stored
+// now: a probe that hit a 429 may have refreshed it, and a model-only cooldown
+// has no credential-level deadline.
+func (m *Manager) quotaCooldownKeptUntil(auth *Auth) time.Time {
+	current, ok := m.GetByID(auth.ID)
+	if !ok || current == nil {
+		current = auth
+	}
+	return soonestKnownReset(current, m.quotaReconcile.schedule.now())
 }
 
 // quotaUsageSnapshotChanged polls the adapter's advisory usage snapshot on its
