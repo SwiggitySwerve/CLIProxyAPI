@@ -8,11 +8,26 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
+const (
+	testUltrafastAccountID = "acct-ultrafast-0001"
+	testOtherAccountID     = "acct-other-0002"
+)
+
+// useUltrafastAccount configures the one credential allowed to use ultrafast and
+// restores the fail-closed default (no credential allowed) afterwards.
+func useUltrafastAccount(t *testing.T) {
+	t.Helper()
+	cliproxyauth.SetUltrafastPolicy(config.UltrafastConfig{AccountIDs: []string{testUltrafastAccountID}})
+	t.Cleanup(func() { cliproxyauth.SetUltrafastPolicy(config.UltrafastConfig{}) })
+}
+
 func TestUltrafastTransportRejectsBeforeUpstream(t *testing.T) {
+	useUltrafastAccount(t)
 	for _, transport := range []string{"http", "http-stream", "websocket", "websocket-stream", "compact"} {
 		for _, mode := range []string{"requested", "override", "header", "duplicate-last", "duplicate-first", "duplicate-escaped"} {
 			t.Run(transport+"/"+mode, func(t *testing.T) {
@@ -24,7 +39,7 @@ func TestUltrafastTransportRejectsBeforeUpstream(t *testing.T) {
 				defer server.Close()
 				credential := codexOAuthTestAuth(server.URL)
 				credential.ID = "other-account"
-				credential.Metadata["email"] = "wrollings@astrabit.io"
+				credential.Metadata["account_id"] = testOtherAccountID
 				cfg := &config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}}
 				payload := []byte(`{"model":"gpt-5.5","service_tier":"ultrafast","input":"hi"}`)
 				switch mode {
@@ -71,13 +86,14 @@ func TestUltrafastTransportRejectsBeforeUpstream(t *testing.T) {
 }
 
 func TestUltrafastWebsocketToggleRejectsBoundOtherAccount(t *testing.T) {
+	useUltrafastAccount(t)
 	var rec codexWebsocketHintRecorder
 	server := newCodexWebsocketHintServer(t, &rec)
 	defer server.Close()
 	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
 	credential := codexOAuthTestAuth(server.URL)
 	credential.ID = "bound-other-account"
-	credential.Metadata["email"] = "wrollings@astrabit.io"
+	credential.Metadata["account_id"] = testOtherAccountID
 	const sessionID = "ultrafast-bound-other"
 	t.Cleanup(func() { exec.CloseExecutionSession(sessionID) })
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: sessionID}}
@@ -92,5 +108,27 @@ func TestUltrafastWebsocketToggleRejectsBoundOtherAccount(t *testing.T) {
 	defer rec.mu.Unlock()
 	if len(rec.frames) != 1 || len(rec.handshakes) != 1 {
 		t.Fatalf("ultrafast escaped on a bound socket: frames=%d handshakes=%d", len(rec.frames), len(rec.handshakes))
+	}
+}
+
+func TestUltrafastUnsetPolicyRejectsBeforeUpstream(t *testing.T) {
+	cliproxyauth.SetUltrafastPolicy(config.UltrafastConfig{})
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	credential := codexOAuthTestAuth(server.URL)
+	credential.ID = "would-be-holder"
+	credential.Metadata["account_id"] = testUltrafastAccountID
+	cfg := &config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}}
+	req := cliproxyexecutor.Request{Model: "gpt-5.5", Payload: []byte(`{"model":"gpt-5.5","service_tier":"ultrafast","input":"hi"}`)}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")}
+	if _, err := NewCodexExecutor(cfg).Execute(context.Background(), credential, req, opts); err == nil {
+		t.Fatal("ultrafast must be denied when the policy is unset")
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("denied request reached upstream %d times", calls.Load())
 	}
 }

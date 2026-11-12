@@ -20,8 +20,9 @@ import (
 )
 
 func TestUltrafastGenericHTTPGuardPreservesBody(t *testing.T) {
+	useUltrafastAccount(t)
 	for _, replayReader := range []bool{false, true} {
-		for _, scenario := range []string{"reject-body", "reject-header", "reject-stale-replay", "allow-research", "allow-default"} {
+		for _, scenario := range []string{"reject-body", "reject-header", "reject-stale-replay", "allow-configured", "allow-default"} {
 			t.Run(scenario+map[bool]string{false: "/no-replay", true: "/replay"}[replayReader], func(t *testing.T) {
 				var calls atomic.Int32
 				payload := []byte(`{"service_tier":"ultrafast"}`)
@@ -38,9 +39,9 @@ func TestUltrafastGenericHTTPGuardPreservesBody(t *testing.T) {
 				}))
 				defer server.Close()
 				credential := codexOAuthTestAuth(server.URL)
-				credential.Metadata["email"] = "wrollings@astrabit.io"
-				if scenario == "allow-research" {
-					credential.Metadata["email"] = "research@astrabit.io"
+				credential.Metadata["account_id"] = testOtherAccountID
+				if scenario == "allow-configured" {
+					credential.Metadata["account_id"] = testUltrafastAccountID
 				}
 				req, err := http.NewRequest(http.MethodPost, server.URL+"/responses", bytes.NewReader(payload))
 				if err != nil {
@@ -82,6 +83,7 @@ func TestUltrafastGenericHTTPGuardPreservesBody(t *testing.T) {
 }
 
 func TestUltrafastDirectImageModelHeaderOverride(t *testing.T) {
+	useUltrafastAccount(t)
 	for _, streaming := range []bool{false, true} {
 		t.Run(map[bool]string{false: "http", true: "stream"}[streaming], func(t *testing.T) {
 			var calls atomic.Int32
@@ -89,7 +91,7 @@ func TestUltrafastDirectImageModelHeaderOverride(t *testing.T) {
 			defer server.Close()
 			credential := codexOAuthTestAuth(server.URL)
 			credential.ID = "image-header-policy"
-			credential.Metadata["email"] = "wrollings@astrabit.io"
+			credential.Metadata["account_id"] = testOtherAccountID
 			const model = "gpt-image-1.5"
 			reg := registry.GetGlobalRegistry()
 			reg.RegisterClient(credential.ID, "codex", []*registry.ModelInfo{{ID: model, Config: &registry.ModelConfig{OverrideHeader: map[string]string{"X-Codex-Routing-Hint": "model=gpt-image-1.5;tier=ultrafast"}}}})
@@ -115,6 +117,7 @@ func TestUltrafastDirectImageModelHeaderOverride(t *testing.T) {
 }
 
 func TestUltrafastDuplexSteerRejectsBoundOtherAccount(t *testing.T) {
+	useUltrafastAccount(t)
 	for _, override := range []bool{false, true} {
 		t.Run(map[bool]string{false: "requested", true: "override"}[override], func(t *testing.T) {
 			var forwarded atomic.Int32
@@ -153,7 +156,7 @@ func TestUltrafastDuplexSteerRejectsBoundOtherAccount(t *testing.T) {
 			credential := codexOAuthTestAuth(server.URL)
 			credential.ID = "duplex-other"
 			credential.Attributes["websockets"] = "true"
-			credential.Metadata["email"] = "wrollings@astrabit.io"
+			credential.Metadata["account_id"] = testOtherAccountID
 			const session = "ultrafast-duplex-test"
 			t.Cleanup(func() { exec.CloseExecutionSession(session) })
 			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("codex"), Metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: session}}

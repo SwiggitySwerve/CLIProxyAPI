@@ -275,6 +275,11 @@ and `DELETE /credentials` return `404`, because config API keys are edited throu
 `/config/...`. `PATCH /credentials/status` keeps its existing behaviour of toggling
 the key's `excluded-models: ["*"]` entry in config.
 
+Every `GET /credentials` entry includes `instance_id` (string) when the process
+has a valid `CLIPROXY_INSTANCE_ID` (the same value that labels usage-queue
+records: lowercase letters, digits and `-`, starting with a letter, at most 64
+characters). It is omitted when the variable is unset or invalid.
+
 For Codex entries, `GET /credentials` includes these non-secret summary fields:
 
 | Field | Type | Meaning |

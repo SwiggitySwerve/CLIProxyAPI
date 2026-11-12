@@ -1,0 +1,51 @@
+# Staging config template. up.sh renders it to $STAGING_DATA_DIR/config.yaml.
+# Placeholders (__LIKE_THIS__) are filled at setup time; the fake upstream keys
+# below are deliberately obvious and only ever reach the local mock upstream.
+config-version: 8
+routing:
+  strategy: soonest-reset
+  session-affinity: true
+  session-affinity-ttl: 1h
+  cooldown:
+    disable-cooling: false
+    quota-reconcile: true
+  retry:
+    request-retry: 2
+    max-retry-interval: 30
+server:
+  host: 0.0.0.0
+  port: 8317
+management:
+  # Published on 127.0.0.1 only; the host request reaches the container via the
+  # pod network, so remote access must be on for management calls from the host.
+  allow-remote: true
+  secret-key: "__STAGING_MANAGEMENT_KEY__"
+  disable-control-panel: true
+access:
+  api-keys:
+    - "__STAGING_CLIENT_KEY__"
+# Fake credentials pointed at the mock upstream (same pod, so localhost).
+# Group A has the higher priority, so it is tried first.
+api-keys:
+  claude:
+    - name: staging-claude-a
+      priority: 10
+      base-url: "__MOCK_BASE_URL__"
+      models:
+        - name: "claude-staging-model"
+      keys:
+        - api-key: "sk-staging-fake-claude-a"
+    - name: staging-claude-b
+      priority: 0
+      base-url: "__MOCK_BASE_URL__"
+      models:
+        - name: "claude-staging-model"
+      keys:
+        - api-key: "sk-staging-fake-claude-b"
+  codex:
+    - name: staging-codex-a
+      base-url: "__MOCK_BASE_URL__"
+      models:
+        - name: "gpt-staging-model"
+      keys:
+        - api-key: "sk-staging-fake-codex-a"

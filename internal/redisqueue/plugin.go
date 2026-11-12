@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -15,7 +14,7 @@ import (
 )
 
 func init() {
-	coreusage.RegisterPlugin(&usageQueuePlugin{instanceID: deploymentInstanceID(os.Getenv("CLIPROXY_INSTANCE_ID"))})
+	coreusage.RegisterPlugin(&usageQueuePlugin{instanceID: DeploymentInstanceID()})
 }
 
 type usageQueuePlugin struct{ instanceID string }

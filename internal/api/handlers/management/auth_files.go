@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/credentialweight"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -802,6 +803,10 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 		entry["request_retry"] = requestRetry
 	}
 	if quota.v8 {
+		// Which proxy instance owns this credential; omitted when CLIPROXY_INSTANCE_ID is unset.
+		if instanceID := redisqueue.DeploymentInstanceID(); instanceID != "" {
+			entry["instance_id"] = instanceID
+		}
 		// OAuth login entry the credential was signed in through; multi-entry plugins store it
 		// next to the provider, and the deprecated v0 route keeps its frozen response shape.
 		if oauthProvider := authOAuthProvider(auth); oauthProvider != "" {

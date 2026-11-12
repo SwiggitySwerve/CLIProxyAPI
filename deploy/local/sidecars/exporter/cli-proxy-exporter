@@ -1,0 +1,461 @@
+#!/usr/bin/env python3
+"""Prometheus exporter for the CLIProxyAPI subscription proxy.
+
+Everything is computed at scrape time from local sources, read-only:
+  - CPA-Manager-Plus usage DB (~/.local/share/cpa-manager-plus/usage.sqlite):
+    requests / tokens / latency / API-equivalent cost per provider, model,
+    account and client key (label from the dashboard's API key aliases).
+  - CLIProxyAPI management API (GET /credentials on each instance): the proxy's own
+    state per credential (available / cooling / unavailable / disabled, next_retry_after,
+    per-model cooldowns, quota signals and their age), labelled by instance and auth_index.
+    This is the source of truth for availability.
+  - cli-proxy-rerank state (~/.local/share/cli-proxy-rerank/state.json): ADVISORY weekly
+    quota used %, reset time, limited flag and soonest-reset rank per account, with its age.
+  - Liveness of the proxy (:8317/healthz) and the dashboard (:18317).
+
+Serves /metrics on 127.0.0.1 and the cluster bridge address so the in-cluster
+Prometheus can scrape it. Labels hold account emails; this endpoint is only
+reachable from the host and the cluster.
+"""
+import json
+import os
+import re
+import sqlite3
+import sys
+import threading
+import time
+import urllib.request
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+HOME = Path.home()
+DB = HOME / ".local/share/cpa-manager-plus/usage.sqlite"
+STATE = HOME / ".local/share/cli-proxy-rerank/state.json"
+PLANS = HOME / ".config/cli-proxy-rerank/plans.json"
+MGMT_KEY = (HOME / ".config/cli-proxy-rerank/management-key").read_text().strip()
+# Proxy instances come from the shared instance map (deploy/local/instances.example.json);
+# the built-in values apply when the file is missing.
+INSTANCES_FILE = Path(os.environ.get("CLI_PROXY_INSTANCES") or HOME / ".config/cli-proxy/instances.json")
+BUILTIN_INSTANCES = [
+    {"id": "claude-primary", "provider": "claude", "base_url": "http://127.0.0.1:8319", "management_path": "/v8/management"},
+    {"id": "codex-primary", "provider": "codex", "base_url": "http://127.0.0.1:8317", "management_path": "/v8/management"},
+]
+# Listen addresses are host-specific and stay out of the repo: ~/.config/cli-proxy/exporter.json
+# {"listen": [["127.0.0.1", 9787], ["<bridge-address>", 9787]]}. CLI_PROXY_EXPORTER_LISTEN
+# ("host:port,host:port") overrides the file; loopback only when neither is set.
+EXPORTER_FILE = Path(os.environ.get("CLI_PROXY_EXPORTER_CONFIG") or HOME / ".config/cli-proxy/exporter.json")
+DASHBOARD = "http://127.0.0.1:18317"
+# Anthropic reports some limits under internal codenames; same labels as the dashboard.
+CLAUDE_WINDOW_NAMES = {"iguana_necktie": "Fable weekly", "seven_day": "Weekly", "five_hour": "5-hour"}
+
+
+def load_proxies():
+    """Instance map as {label: (base URL, management URL, instance id)}; the label is the provider name."""
+    try:
+        instances = json.loads(INSTANCES_FILE.read_text())["instances"]
+    except FileNotFoundError:
+        instances = BUILTIN_INSTANCES
+    proxies = {}
+    for i in instances:
+        base = i["base_url"].rstrip("/")
+        proxies[i["provider"] if i["provider"] not in proxies else i["id"]] = (
+            base, base + i.get("management_path", "/v8/management"), i["id"])
+    return proxies
+
+
+def load_listen():
+    spec = os.environ.get("CLI_PROXY_EXPORTER_LISTEN")
+    if spec:
+        return [(h, int(p)) for h, _, p in (s.strip().rpartition(":") for s in spec.split(","))]
+    try:
+        return [(h, int(p)) for h, p in json.loads(EXPORTER_FILE.read_text())["listen"]]
+    except FileNotFoundError:
+        return [("127.0.0.1", 9787)]
+
+
+PROXIES = load_proxies()
+LISTEN = load_listen()
+
+
+def esc(value) -> str:
+    return str(value if value not in (None, "") else "unknown").replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+
+class Metrics:
+    def __init__(self):
+        self.lines = []  # "# HELP/TYPE" strings, or [series, value] pairs
+        self.series = {}  # series -> its [series, value] pair, so repeats are summed
+        self.declared = set()
+        self.now = time.time()  # one clock for the whole scrape
+        self.creds = None  # GET /credentials result, fetched once per scrape
+
+    def add(self, name, kind, help_text, value, **labels):
+        if name not in self.declared:
+            self.lines.append(f"# HELP {name} {help_text}")
+            self.lines.append(f"# TYPE {name} {kind}")
+            self.declared.add(name)
+        lab = ",".join(f'{k}="{esc(v)}"' for k, v in labels.items())
+        series = f"{name}{{{lab}}}" if lab else name
+        if series in self.series:
+            self.series[series][1] += float(value)
+        else:
+            self.series[series] = [series, float(value)]
+            self.lines.append(self.series[series])
+
+    def text(self):
+        # Full precision: counters reach 1e9+ tokens, and 6 significant digits hid small increments.
+        return "\n".join(l if isinstance(l, str) else f"{l[0]} {l[1]:.17g}" for l in self.lines) + "\n"
+
+
+def http_ok(url, headers=None, timeout=5):
+    try:
+        req = urllib.request.Request(url, headers=headers or {})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return 200 <= resp.status < 400, resp.read()
+    except Exception:
+        return False, b""
+
+
+def load_prices(db):
+    """Effective (input, output, cache read, cache write) $/1M per model, per context tier
+    and for each service tier (priority/fast, ultrafast). Tier rows override only their configured fields; unset cache
+    read falls back to the cache price or 10% of input, unset cache write to input (the
+    dashboard's pricing rules)."""
+    def effective(base, row=None):
+        b_in, b_out, b_cache, b_cread, b_ccreate, b_cread_ok, b_ccreate_ok = base
+        if row:
+            r_in, r_out, r_cache, r_cread, r_ccreate, in_ok, out_ok, cache_ok, cread_ok, ccreate_ok = row
+            b_in = r_in if in_ok else b_in
+            b_out = r_out if out_ok else b_out
+            b_cache = r_cache if cache_ok else b_cache
+            b_cread, b_cread_ok = (r_cread, True) if cread_ok else (b_cread, b_cread_ok)
+            b_ccreate, b_ccreate_ok = (r_ccreate, True) if ccreate_ok else (b_ccreate, b_ccreate_ok)
+        b_in, b_out = b_in or 0, b_out or 0
+        cread = b_cread if b_cread_ok else (b_cache or b_in * 0.1)
+        ccreate = b_ccreate if b_ccreate_ok else b_in
+        return (b_in, b_out, cread or 0, ccreate or 0)
+
+    base = {r[0]: r[1:] for r in db.execute(
+        "SELECT model, prompt_per_1m, completion_per_1m, cache_per_1m, cache_read_per_1m, cache_creation_per_1m, "
+        "cache_read_configured, cache_creation_configured FROM model_prices")}
+    tier_cols = ("prompt_per_1m, completion_per_1m, cache_per_1m, cache_read_per_1m, cache_creation_per_1m, "
+                 "prompt_configured, completion_configured, cache_configured, cache_read_configured, "
+                 "cache_creation_configured")
+    prices = {model: effective(b) for model, b in base.items()}
+    context = {(r[0], r[1]): effective(base[r[0]], r[2:]) for r in db.execute(
+        f"SELECT model, threshold_tokens, {tier_cols} FROM model_price_context_tiers") if r[0] in base}
+    tiers = {}
+    for r in db.execute(f"SELECT model, mode, service_tier, {tier_cols} FROM model_price_service_tiers"):
+        if r[0] in base:
+            for name in (r[1], r[2]):
+                if name:
+                    tiers[(r[0], name.strip().lower())] = effective(base[r[0]], r[3:])
+    return prices, context, tiers
+
+
+def collect_usage(m: Metrics):
+    db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True, timeout=5)
+    try:
+        aliases = dict(db.execute("SELECT api_key_hash, alias FROM api_key_aliases").fetchall()) \
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='api_key_aliases'").fetchone() else {}
+        prices, context_prices, tier_prices = load_prices(db)
+        # Each event is priced by its band, as the dashboard does: a request whose total input
+        # (cached included) is above a model's context-tier threshold (e.g. >272K) uses that
+        # tier's rates; otherwise the stored service tier (priority/fast, ultrafast)
+        # selects its own price row. Legacy "-fast" aliases kept the
+        # client's tier, so the name suffix also selects priority for their historical events.
+        rows = db.execute("""
+            SELECT provider, COALESCE(NULLIF(requested_model,''), model) AS req_model,
+                   COALESCE(NULLIF(resolved_model,''), model) AS billing_model,
+                   COALESCE(NULLIF(account_snapshot,''), auth_label_snapshot, auth_index) AS account,
+                   api_key_hash, failed,
+                   COUNT(*), SUM(input_tokens), SUM(output_tokens), SUM(cached_tokens), SUM(reasoning_tokens),
+                   SUM(total_tokens), SUM(normalized_uncached_input_tokens), SUM(normalized_cache_read_tokens),
+                   SUM(normalized_cache_creation_tokens), SUM(latency_ms),
+                   SUM(CASE WHEN ttft_ms > 0 THEN ttft_ms ELSE 0 END), SUM(CASE WHEN ttft_ms > 0 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN failed=0 AND total_tokens=0 THEN 1 ELSE 0 END), MAX(timestamp_ms),
+                   LOWER(TRIM(COALESCE(service_tier, ''))) AS tier,
+                   COALESCE((SELECT MAX(t.threshold_tokens) FROM model_price_context_tiers t
+                             WHERE t.model IN (NULLIF(e.resolved_model, ''), e.model)
+                               AND COALESCE(e.normalized_total_input_tokens, e.input_tokens, 0) > t.threshold_tokens),
+                            0) AS context_band
+            FROM usage_events e GROUP BY 1,2,3,4,5,6,tier,context_band""").fetchall()
+        last_event = 0
+        for (prov, req_model, billing_model, account, key_hash, failed, calls, tin, tout, tcached, treason, ttotal,
+             n_uncached, n_cache_read, n_cache_create, lat, ttft, ttft_n, zero, last_ts, tier,
+             context_band) in rows:
+            client = aliases.get(key_hash) or (f"key {key_hash[:8]}" if key_hash else "unknown")
+            base = dict(provider=prov, model=req_model, account=account, client=client)
+            status = "failed" if failed else "success"
+            m.add("cliproxy_requests_total", "counter", "Requests through the proxy.", calls, status=status, **base)
+            for kind, val in (("input", tin), ("output", tout), ("cached", tcached), ("reasoning", treason)):
+                m.add("cliproxy_tokens_total", "counter", "Tokens by type (cached and reasoning are subsets).",
+                      val or 0, type=kind, **base)
+            m.add("cliproxy_latency_seconds_sum", "counter", "Summed end-to-end request latency.", (lat or 0) / 1000, **base)
+            # TTFT sum and count share one filter (ttft_ms > 0) so sum/count is a true average.
+            m.add("cliproxy_ttft_seconds_sum", "counter", "Summed time to first token.", (ttft or 0) / 1000, **base)
+            m.add("cliproxy_ttft_seconds_count", "counter", "Requests with a time to first token recorded.",
+                  ttft_n or 0, **base)
+            # Normalized per provider: Claude cache_creation_input_tokens are the cache writes.
+            for kind, val in (("read", n_cache_read), ("write", n_cache_create)):
+                m.add("cliproxy_cache_tokens_total", "counter", "Prompt-cache tokens read and written.",
+                      val or 0, type=kind, **base)
+            m.add("cliproxy_latency_seconds_count", "counter", "Requests with latency recorded.", calls, **base)
+            m.add("cliproxy_zero_token_success_total", "counter",
+                  "Successful requests recorded with 0 tokens (accounting gap).", zero or 0, **base)
+            # Bill the model that served the request (aliases record their target here).
+            base_model = billing_model
+            price = None
+            if context_band:
+                price = context_prices.get((base_model, context_band))
+            elif tier:
+                price = tier_prices.get((base_model, tier))
+            if not price and not context_band and req_model.endswith("-fast"):
+                price = tier_prices.get((base_model, "priority"))
+            price = price or prices.get(base_model)
+            if price:
+                p_in, p_out, p_cread, p_ccreate = price
+                cost = ((n_uncached or 0) * p_in + (tout or 0) * p_out +
+                        (n_cache_read or 0) * p_cread + (n_cache_create or 0) * p_ccreate) / 1e6
+                m.add("cliproxy_api_equivalent_cost_usd_total", "counter",
+                      "What this traffic would cost at API list prices (synced in the dashboard).", cost, **base)
+            last_event = max(last_event, last_ts or 0)
+        m.add("cliproxy_last_request_timestamp_seconds", "gauge", "Time of the newest recorded request.", last_event / 1000)
+        m.add("cliproxy_models_priced", "gauge", "Models with a configured price.", len(prices))
+    finally:
+        db.close()
+
+
+def collect_quota(m: Metrics):
+    # Advisory only: cli-proxy-rerank's own usage-endpoint reads. The proxy's state is in the
+    # cliproxy_credential_* metrics (collect_credentials); trust those for availability.
+    state = json.loads(STATE.read_text())
+    m.add("cliproxy_rerank_last_run_timestamp_seconds", "gauge", "Last successful cli-proxy-rerank run.", state["updated_at"])
+    m.add("cliproxy_rerank_state_age_seconds", "gauge", "Seconds since the last cli-proxy-rerank run (advisory data age).",
+          max(m.now - state["updated_at"], 0))
+    try:
+        creds = fetch_credentials(m)
+    except Exception:  # the advisory metrics above and below do not need the join
+        creds = []
+    by_auth = {(c["_instance"], c.get("auth_index")): c for c in creds}
+    by_email = {(c.get("provider"), c.get("email")): c for c in creds}
+    for a in state["accounts"]:
+        lab = dict(provider=a["provider"], account=a["account"])
+        cred = by_auth.get((a.get("instance"), a.get("auth_index"))) or by_email.get((a["provider"], a["account"]))
+        if cred:  # new advisory metrics carry instance and auth_index, not the account name
+            alab = dict(instance=cred["_instance"], provider=a["provider"], auth_index=cred.get("auth_index"))
+            m.add("cliproxy_account_advisory_age_seconds", "gauge",
+                  "Age of rerank's reading for the credential (advisory; its probe may have failed since).",
+                  max(m.now - (a.get("observed_at") or state["updated_at"]), 0), **alab)
+            if "probe_status" in a:
+                m.add("cliproxy_account_advisory_unknown", "gauge",
+                      "1 when rerank's last probe of the credential failed and the reading is carried over.",
+                      1 if a["probe_status"] == "unknown" else 0, **alab)
+        if a.get("used_percent") is not None:
+            m.add("cliproxy_account_quota_used_percent", "gauge", "Weekly quota used (advisory, from rerank).", a["used_percent"], **lab)
+        if a.get("reset_at"):
+            m.add("cliproxy_account_quota_reset_timestamp_seconds", "gauge", "Weekly quota reset time (advisory, from rerank).", a["reset_at"], **lab)
+        m.add("cliproxy_account_limited", "gauge",
+              "1 when rerank's last reading says the account is limited (advisory; see cliproxy_credential_available for the proxy's state).",
+              1 if a["limited"] else 0, **lab)
+        m.add("cliproxy_account_rank", "gauge", "Advisory soonest-reset order within its provider (1 = soonest; not the proxy's routing).", a["rank"], **lab)
+        if a.get("credits_balance") is not None:
+            m.add("cliproxy_account_credits_balance", "gauge",
+                  "ChatGPT credit balance (spent once the plan quota is exhausted).", a["credits_balance"], **lab)
+            lo, hi = (a.get("credits_approx_local_messages") or [None, None])[:2]
+            if lo is not None:
+                m.add("cliproxy_account_credits_approx_messages", "gauge",
+                      "Approximate local Codex messages the credit balance covers.", lo, bound="low", **lab)
+                m.add("cliproxy_account_credits_approx_messages", "gauge",
+                      "Approximate local Codex messages the credit balance covers.", hi, bound="high", **lab)
+            m.add("cliproxy_account_credits_overage_reached", "gauge", "1 when the credit overage limit is reached.",
+                  1 if a.get("credits_overage_reached") else 0, **lab)
+        if a.get("reset_credits_available") is not None:
+            m.add("cliproxy_account_reset_credits_available", "gauge",
+                  "Rate-limit reset credits available (manual quota resets).", a["reset_credits_available"], **lab)
+        for lim in a.get("spend_limits") or []:
+            wl = dict(lab, window=CLAUDE_WINDOW_NAMES.get(lim["window"], lim["window"]))
+            if lim.get("limit_usd") is not None:
+                m.add("cliproxy_account_spend_limit_usd", "gauge", "Dollar spend limit of a usage window.", lim["limit_usd"], **wl)
+            if lim.get("used_usd") is not None:
+                m.add("cliproxy_account_spend_used_usd", "gauge", "Dollars used in a usage window.", lim["used_usd"], **wl)
+
+
+def collect_plans(m: Metrics):
+    # One email can hold a plan with each provider, so keys may be "provider/email" with an `account` field.
+    for key, plan in json.loads(PLANS.read_text()).get("accounts", {}).items():
+        m.add("cliproxy_subscription_monthly_usd", "gauge", "Monthly subscription price of the account.",
+              plan["monthly_usd"], provider=plan.get("provider"), account=plan.get("account", key), plan=plan.get("plan"))
+
+
+def parse_time(value):
+    """RFC 3339 timestamp (nanosecond precision, any offset) -> epoch seconds; None for empty or Go's zero time."""
+    if not value:
+        return None
+    t = re.sub(r"(\.\d{6})\d+", r"\1", str(value)).replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(t)
+    except ValueError:
+        return None
+    return None if dt.year < 2000 else dt.timestamp()
+
+
+def fetch_credentials(m: Metrics):
+    """GET /credentials on every instance, once per scrape: the proxy's own view of each credential."""
+    if m.creds is None:
+        files = []
+        for name, (_, mgmt, inst_id) in PROXIES.items():
+            ok, body = http_ok(f"{mgmt}/credentials", {"Authorization": f"Bearer {MGMT_KEY}"})
+            if not ok:
+                raise RuntimeError(f"{name} proxy credentials unreadable")
+            files += [{**c, "_instance": inst_id} for c in json.loads(body).get("files", [])]
+        m.creds = files
+    return m.creds
+
+
+# Quota signals the proxy records from upstream response headers (credential level and per model).
+CLAUDE_SIGNAL = re.compile(r"^anthropic-ratelimit-unified-(?:(\w+)-)?(utilization|reset|status)$", re.I)
+CODEX_SIGNAL = re.compile(r"^x-codex-(primary|secondary)-(used-percent|reset-at)$", re.I)
+
+
+def _number(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def collect_quota_signals(m: Metrics, lab, model, quota):
+    observed = parse_time((quota or {}).get("observed_at"))
+    if observed is None:
+        return
+    lab = dict(lab, model=model or "all")
+    m.add("cliproxy_credential_quota_observed_timestamp_seconds", "gauge",
+          "When the proxy last observed upstream quota signals for the credential (model all = credential level).",
+          observed, **lab)
+    m.add("cliproxy_credential_quota_age_seconds", "gauge",
+          "Seconds since the proxy last observed quota signals (stale readings are not current truth).",
+          max(m.now - observed, 0), **lab)
+    signals = quota.get("signals") or {}
+    codex_windows = {w: signals.get(f"X-Codex-{w.title()}-Window-Minutes") for w in ("primary", "secondary")}
+    for key, raw in signals.items():
+        cm, xm = CLAUDE_SIGNAL.match(key), CODEX_SIGNAL.match(key)
+        if cm:
+            window, kind = (cm.group(1) or "unified").lower(), cm.group(2).lower()
+        elif xm:
+            window, kind = xm.group(1).lower(), xm.group(2).lower()
+            if codex_windows.get(window) in (None, "", "0"):  # unused secondary window reports zeros
+                continue
+        else:
+            continue
+        wl = dict(lab, window=window)
+        if kind in ("utilization", "used-percent", "reset", "reset-at") and _number(raw) is None:
+            continue
+        if kind in ("utilization", "used-percent"):
+            ratio = _number(raw) / (100 if kind == "used-percent" else 1)
+            m.add("cliproxy_credential_quota_used_ratio", "gauge", "Quota window used, 0-1, from the proxy's signals.", ratio, **wl)
+        elif kind in ("reset", "reset-at"):
+            m.add("cliproxy_credential_quota_reset_timestamp_seconds", "gauge",
+                  "Quota window reset time from the proxy's signals.", _number(raw), **wl)
+        else:
+            m.add("cliproxy_credential_quota_status_info", "gauge",
+                  "Upstream quota window status from the proxy's signals (value always 1).", 1, status=raw, **wl)
+
+
+def collect_credentials(m: Metrics):
+    for c in fetch_credentials(m):
+        state = "disabled" if c.get("disabled") else (c.get("status") or "unknown")
+        # Codex and Claude word a quota limit differently; neither means the login is broken.
+        if state == "error" and any(s in (c.get("status_message") or "") for s in ("usage_limit_reached", "rate_limit_error")):
+            state = "cooldown"
+        m.add("cliproxy_credential_info", "gauge", "Credential status (value always 1).", 1,
+              provider=c.get("provider"), account=c.get("email") or c.get("name"), status=state)
+
+        # Proxy truth, labelled by instance and auth_index (no account names).
+        lab = dict(instance=c["_instance"], provider=c.get("provider"), auth_index=c.get("auth_index"))
+        retry = parse_time(c.get("next_retry_after"))
+        cooldowns = [d for d in c.get("cooldowns") or [] if (parse_time(d.get("retry_at")) or 0) > m.now]
+        cooling = (retry is not None and retry > m.now) or bool(cooldowns)
+        if c.get("disabled"):
+            kind = "disabled"
+        elif cooling:
+            kind = "cooling"
+        elif c.get("unavailable"):
+            kind = "unavailable"
+        else:
+            kind = "available"
+        m.add("cliproxy_credential_state", "gauge",
+              "Proxy's state of the credential: available, cooling (quota/error deadline pending), unavailable or disabled (value always 1).",
+              1, state=kind, status=c.get("status"), **lab)
+        m.add("cliproxy_credential_available", "gauge",
+              "1 when the proxy would route to this credential now (not disabled, unavailable or cooling).",
+              1 if kind == "available" else 0, **lab)
+        m.add("cliproxy_credential_quota_blocked", "gauge", "1 when the proxy has the credential blocked on quota.",
+              1 if c.get("quota_blocked") else 0, **lab)
+        if retry is not None:
+            m.add("cliproxy_credential_next_retry_timestamp_seconds", "gauge",
+                  "When the proxy will next try the credential (its next_retry_after).", retry, **lab)
+        for d in c.get("cooldowns") or []:
+            deadline = parse_time(d.get("retry_at"))
+            if deadline is not None:
+                m.add("cliproxy_credential_cooldown_retry_timestamp_seconds", "gauge",
+                      "Deadline of a credential- or model-scope cooldown held by the proxy.", deadline,
+                      scope=d.get("scope"), model=d.get("model_key") or "all", reason=d.get("reason"), **lab)
+        collect_quota_signals(m, lab, "", c.get("quota"))
+        for model, quota in (c.get("model_quotas") or {}).items():
+            collect_quota_signals(m, lab, model, quota)
+
+
+def render() -> str:
+    m = Metrics()
+    up_dash, _ = http_ok(f"{DASHBOARD}/management.html")
+    for name, (base, _, _) in PROXIES.items():
+        up_proxy, _ = http_ok(f"{base}/healthz")
+        m.add("cliproxy_up", "gauge", "Service reachable.", 1 if up_proxy else 0, service="proxy", proxy=name)
+    m.add("cliproxy_up", "gauge", "Service reachable.", 1 if up_dash else 0, service="dashboard")
+    for name, fn in (("usage", collect_usage), ("quota", collect_quota), ("credentials", collect_credentials), ("plans", collect_plans)):
+        start = time.time()
+        try:
+            fn(m)
+            ok = 1
+        except Exception as exc:  # one broken source must not hide the others
+            print(f"{name}: {exc}", file=sys.stderr)
+            ok = 0
+        m.add("cliproxy_exporter_collector_success", "gauge", "Collector ran without error.", ok, collector=name)
+        m.add("cliproxy_exporter_collector_seconds", "gauge", "Collector run time.", time.time() - start, collector=name)
+    return m.text()
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.split("?")[0] != "/metrics":
+            self.send_response(404)
+            self.end_headers()
+            return
+        body = render().encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+if __name__ == "__main__":
+    if "--once" in sys.argv:
+        sys.stdout.write(render())
+        sys.exit(0)
+    servers = []
+    for addr in LISTEN:
+        try:
+            servers.append(ThreadingHTTPServer(addr, Handler))
+        except OSError as exc:
+            print(f"cannot listen on {addr}: {exc}", file=sys.stderr)
+    if not servers:
+        sys.exit(1)
+    for srv in servers[1:]:
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+    servers[0].serve_forever()

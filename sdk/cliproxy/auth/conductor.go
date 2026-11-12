@@ -282,6 +282,8 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		manager.ApplyHomeInFlightPublisherConfig(defaultInFlightConfig)
 	}
 	manager.scheduler = newAuthScheduler(selector)
+	manager.RegisterQuotaRecheckAdapter(codexQuotaRecheckAdapter{})
+	manager.RegisterQuotaRecheckAdapter(claudeQuotaRecheckAdapter{})
 	return manager
 }
 
