@@ -101,9 +101,11 @@ func TestServiceRun_ShutdownContextFreshAtExit(t *testing.T) {
 		t.Fatalf("failed to write dummy config: %v", errWrite)
 	}
 
+	started := make(chan struct{})
 	service, errBuild := NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(cfgPath).
+		WithHooks(Hooks{OnAfterStart: func(*Service) { close(started) }}).
 		Build()
 	if errBuild != nil {
 		t.Fatalf("failed to build service: %v", errBuild)
@@ -116,16 +118,18 @@ func TestServiceRun_ShutdownContextFreshAtExit(t *testing.T) {
 		runDone <- service.Run(runCtx)
 	}()
 
-	// Wait for server to accept connections.
-	var conn net.Conn
-	var errDial error
-	for i := 0; i < 50; i++ {
-		conn, errDial = net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-		if errDial == nil {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
+	// Run does its startup work before it starts the server and then calls
+	// OnAfterStart; how long that takes depends on machine load, so wait for the
+	// event instead of a fixed dial budget. The timeout only guards against a hang.
+	select {
+	case <-started:
+	case errRun := <-runDone:
+		t.Fatalf("service.Run exited before the server started: %v", errRun)
+	case <-time.After(30 * time.Second):
+		cancel()
+		t.Fatal("timed out waiting for the service to start")
 	}
+	conn, errDial := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if errDial != nil {
 		cancel()
 		t.Fatalf("failed to dial service server: %v", errDial)
