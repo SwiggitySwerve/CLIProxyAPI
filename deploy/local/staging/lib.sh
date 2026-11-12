@@ -128,5 +128,17 @@ wait_http() { # wait_http <url> [seconds]
   return 1
 }
 
+# wait_api_ready <base-url> [seconds]: /healthz answers before credentials load; the API
+# routes answer 503 until the initial auth load finishes. An unauthenticated GET
+# /v1/models gets 503 while loading and 401 (or 200) once ready.
+wait_api_ready() {
+  local i code
+  for i in $(seq 1 "${2:-60}"); do
+    code=$(curl -s -o /dev/null -w '%{http_code}' "$1/v1/models" 2>/dev/null || true)
+    case "$code" in 000|503) sleep 1 ;; *) return 0 ;; esac
+  done
+  return 1
+}
+
 proxy_url() { echo "http://127.0.0.1:$PROXY_PORT"; }
 mock_url() { echo "http://127.0.0.1:$MOCK_PORT"; }
