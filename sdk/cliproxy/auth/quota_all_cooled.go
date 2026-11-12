@@ -124,8 +124,9 @@ func (m *Manager) allCooledNext(ctx context.Context, round *allCooledRound, prov
 		// will try again means the pool is not all cooled: the request's own
 		// retry goes back to it, so no half-open trial is spent on the cooled
 		// ones. A failure that cooled it, no retry round left, or a round that
-		// ended in a 429 (the next round would wait a quota floor first) keeps
-		// the trial.
+		// ended in a 429 keeps the trial: after a 429 the next round usually
+		// waits a quota floor first (a zero-hint transient 429 or disabled
+		// cooling would not, and then the trial is merely redundant).
 		if isRequestRetryRoundError(finalErr) && statusCodeFromError(finalErr) != http.StatusTooManyRequests && m.triedCredentialRetriedNextRound(ctx, round, providers, model, opts, tried) {
 			return nil, nil, nil, "", false
 		}
