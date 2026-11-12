@@ -4,6 +4,7 @@ package management
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"fmt"
 	"net/http"
@@ -28,6 +29,10 @@ type attemptInfo struct {
 	count        int
 	blockedUntil time.Time
 	lastActivity time.Time // track last activity for cleanup
+	// failedKeys holds a SHA-256 of each distinct wrong key counted since the
+	// last success or ban, so a client repeating one stale (or missing) key
+	// counts once instead of banning itself. At most maxFailures entries.
+	failedKeys map[[sha256.Size]byte]struct{}
 }
 
 // attemptCleanupInterval controls how often stale IP entries are purged
@@ -392,6 +397,7 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		// Ban expired, reset state
 		ai.blockedUntil = time.Time{}
 		ai.count = 0
+		ai.failedKeys = nil
 	}
 	h.attemptsMu.Unlock()
 
@@ -399,18 +405,32 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		return false, http.StatusForbidden, "remote management disabled"
 	}
 
+	// fail counts a distinct wrong key once per client. Guessing needs many
+	// different keys and still bans after maxFailures of them; a client that
+	// repeats one stale or missing key (every host-side caller of a rootless
+	// podman container shares one source address) does not lock itself out.
 	fail := func() {
+		keyHash := sha256.Sum256([]byte(provided))
 		h.attemptsMu.Lock()
 		aip := h.failedAttempts[clientIP]
 		if aip == nil {
 			aip = &attemptInfo{}
 			h.failedAttempts[clientIP] = aip
 		}
-		aip.count++
 		aip.lastActivity = time.Now()
+		if _, seen := aip.failedKeys[keyHash]; seen {
+			h.attemptsMu.Unlock()
+			return
+		}
+		if aip.failedKeys == nil {
+			aip.failedKeys = make(map[[sha256.Size]byte]struct{}, maxFailures)
+		}
+		aip.failedKeys[keyHash] = struct{}{}
+		aip.count++
 		if aip.count >= maxFailures {
 			aip.blockedUntil = time.Now().Add(banDuration)
 			aip.count = 0
+			aip.failedKeys = nil
 		}
 		h.attemptsMu.Unlock()
 	}
@@ -420,6 +440,7 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		if ai := h.failedAttempts[clientIP]; ai != nil {
 			ai.count = 0
 			ai.blockedUntil = time.Time{}
+			ai.failedKeys = nil
 		}
 		h.attemptsMu.Unlock()
 	}

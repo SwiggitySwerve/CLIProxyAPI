@@ -36,10 +36,14 @@ type quotaRecheckPolicy struct {
 	nearWindow   time.Duration
 }
 
+// quotaRecheckCadence is a provider's default cadence (registry recheckCadence).
+type quotaRecheckCadence struct {
+	interval, nearInterval, nearWindow time.Duration
+}
+
 // quotaRecheckPolicyFor resolves the configured mode and cadence for provider.
-// Codex defaults reproduce the original loop: probe a cooled credential on
-// every pass, limited only by quotaProbeMinGap. Other providers default to a
-// slow cadence with a faster one shortly before a known reset.
+// A provider without a registry cadence (Codex has one) defaults to a slow
+// cadence with a faster one shortly before a known reset.
 func quotaRecheckPolicyFor(cfg *internalconfig.Config, provider string) quotaRecheckPolicy {
 	if cfg == nil {
 		return quotaRecheckPolicy{mode: internalconfig.QuotaReconcileOff}
@@ -54,8 +58,8 @@ func quotaRecheckPolicyFor(cfg *internalconfig.Config, provider string) quotaRec
 		nearInterval: claudeRecheckNearInterval,
 		nearWindow:   claudeRecheckNearWindow,
 	}
-	if strings.EqualFold(strings.TrimSpace(provider), "codex") {
-		policy.interval, policy.nearInterval, policy.nearWindow = quotaProbeMinGap, quotaProbeMinGap, 0
+	if c := providerQuotaFor(provider).recheckCadence; c != nil {
+		policy.interval, policy.nearInterval, policy.nearWindow = c.interval, c.nearInterval, c.nearWindow
 	}
 	if configured.Interval > 0 {
 		policy.interval = configured.Interval

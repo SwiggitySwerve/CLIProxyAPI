@@ -582,7 +582,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 	}
 	attempted := make(map[string]struct{})
-	allCooled := newAllCooledRound(defaultRequestRetry)
+	allCooled := newAllCooledRound(defaultRequestRetry, retryRound)
 	var lastErr error
 	var upstreamErr error
 	for {
@@ -1047,7 +1047,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	lastHomeAuthID := ""
 	homeSameAuthRetryPending := false
 	attempted := make(map[string]struct{})
-	allCooled := newAllCooledRound(defaultRequestRetry)
+	allCooled := newAllCooledRound(defaultRequestRetry, retryRound)
 	var lastErr error
 	var upstreamErr error
 	var roundTiming homeRetryRoundTiming
