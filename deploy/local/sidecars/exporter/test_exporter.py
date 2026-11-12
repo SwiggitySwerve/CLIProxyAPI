@@ -3,18 +3,18 @@
 Run: python3 -m unittest deploy/local/sidecars/exporter/test_exporter.py
 """
 import json
-import os
 import math
-import copy
-import io
+import time
+from unittest.mock import patch
+import os
+import subprocess
 import sys
 import tempfile
 import threading
 import unittest
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
-from unittest.mock import patch
 
 SCRIPT = Path(__file__).with_name("cli-proxy-exporter")
 FAR_FUTURE = "2099-01-01T00:00:00.123456789+08:00"  # nanoseconds and a non-UTC offset, as the proxy sends
@@ -35,8 +35,7 @@ CREDS = [
 
 class Stub(BaseHTTPRequestHandler):
     def do_GET(self):
-        body = (json.dumps({"files": CREDS}).encode() if self.path.endswith("/credentials") else
-                json.dumps(usage_payload()).encode() if self.path.endswith("/v1/exporter") else b"ok")
+        body = json.dumps({"files": CREDS}).encode() if self.path.endswith("/credentials") else b"ok"
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -61,8 +60,8 @@ class ExporterProxyTruth(unittest.TestCase):
             mod = load_exporter(tmp)
             mod.PROXIES = {"claude": (f"http://127.0.0.1:{srv.server_port}",
                                        f"http://127.0.0.1:{srv.server_port}/m", "stub")}
-            mod.USAGE = mod.DASHBOARD = f"http://127.0.0.1:{srv.server_port}"
-            with patch.object(mod, 'collect_quota'), patch.object(mod, 'collect_plans'):
+            with patch.object(mod, 'fetch_usage', return_value=(True, json.dumps(health_payload()).encode())), \
+                 patch.object(mod, 'collect_usage'), patch.object(mod, 'collect_quota'), patch.object(mod, 'collect_plans'):
                 out = mod.render()
         srv.shutdown()
         srv.server_close()
@@ -111,160 +110,180 @@ def load_exporter(home: Path):
             os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
 
 
-def usage_group(**overrides):
-    return dict(provider="claude", model="m1", account="acct", client="Work laptop", status="success",
-                requests=5, tokens=dict(input=123, output=45, cached=6, reasoning=7),
-                cache=dict(read=80, write=9), latency_seconds_sum=2.5, latency_seconds_count=5,
-                ttft_seconds_sum=0.4, ttft_seconds_count=2, zero_token_success=1,
-                cost_usd=1.25, **overrides)
+USAGE_SCHEMA = """
+CREATE TABLE usage_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp_ms INTEGER, provider TEXT, requested_model TEXT,
+    model TEXT, resolved_model TEXT, account_snapshot TEXT, auth_label_snapshot TEXT, auth_index TEXT,
+    api_key_hash TEXT, failed INTEGER, input_tokens INTEGER, output_tokens INTEGER, cached_tokens INTEGER,
+    reasoning_tokens INTEGER, total_tokens INTEGER, normalized_uncached_input_tokens INTEGER,
+    normalized_cache_read_tokens INTEGER, normalized_cache_creation_tokens INTEGER,
+    normalized_total_input_tokens INTEGER, latency_ms INTEGER, ttft_ms INTEGER, service_tier TEXT);
+CREATE TABLE model_prices (model TEXT, prompt_per_1m REAL, completion_per_1m REAL, cache_per_1m REAL,
+    cache_read_per_1m REAL, cache_creation_per_1m REAL, cache_read_configured INTEGER,
+    cache_creation_configured INTEGER);
+CREATE TABLE model_price_context_tiers (model TEXT, threshold_tokens INTEGER, prompt_per_1m REAL,
+    completion_per_1m REAL, cache_per_1m REAL, cache_read_per_1m REAL, cache_creation_per_1m REAL,
+    prompt_configured INTEGER, completion_configured INTEGER, cache_configured INTEGER,
+    cache_read_configured INTEGER, cache_creation_configured INTEGER);
+CREATE TABLE model_price_service_tiers (model TEXT, mode TEXT, service_tier TEXT, prompt_per_1m REAL,
+    completion_per_1m REAL, cache_per_1m REAL, cache_read_per_1m REAL, cache_creation_per_1m REAL,
+    prompt_configured INTEGER, completion_configured INTEGER, cache_configured INTEGER,
+    cache_read_configured INTEGER, cache_creation_configured INTEGER);
+CREATE TABLE usage_data_migrations (name TEXT PRIMARY KEY, status TEXT, applied_rows INTEGER,
+    updated_at_ms INTEGER);
+INSERT INTO model_prices VALUES ('m1', 2.0, 10.0, NULL, NULL, NULL, 0, 0);
+INSERT INTO model_price_context_tiers VALUES ('m1', 1000, 4.0, 20.0, NULL, NULL, NULL, 1, 1, 0, 0, 0);
+INSERT INTO usage_data_migrations VALUES ('usage_cache_accounting_v2', 'completed', 0, 1);
+"""
 
 
-def usage_payload():
-    return dict(schema_version=1, missing_reported_counters=0, groups=[usage_group()],
-                newest_event_time_seconds=1700000000.123, models_priced=34,
-                rate_book_error=False, client_alias_error=False, sources=[
-                    dict(instance="claude-primary", state="subscribed", subscribed=True, last_event_age_seconds=1.5),
-                    dict(instance="codex-primary", state="backoff", subscribed=False, last_event_age_seconds=None)])
+def add_events(db, n, *, tokens=100, account="acct"):
+    db.executemany(
+        "INSERT INTO usage_events (timestamp_ms, provider, requested_model, model, resolved_model, account_snapshot,"
+        " api_key_hash, failed, input_tokens, output_tokens, cached_tokens, reasoning_tokens, total_tokens,"
+        " normalized_uncached_input_tokens, normalized_cache_read_tokens, normalized_cache_creation_tokens,"
+        " normalized_total_input_tokens, latency_ms, ttft_ms, service_tier)"
+        " VALUES (?, 'claude', 'm1', 'm1', 'm1', ?, 'k', 0, ?, 10, 0, 0, ?, ?, 0, 0, ?, 500, 100, '')",
+        [(1_700_000_000_000 + i, account, tokens, tokens + 10, tokens, tokens) for i in range(n)])
+    db.commit()
 
 
 class ExporterUsageCounters(unittest.TestCase):
+    """Usage counters are running sums over usage_events, folded in by id instead of re-reading the
+    whole table each scrape (a full GROUP BY spilled ~230 MB of temp files per scrape)."""
+
+    def setUp(self):
+        import sqlite3
+        self.tmp = tempfile.TemporaryDirectory(dir="/dev/shm")
+        home = Path(self.tmp.name)
+        db_path = home / ".local/share/cpa-manager-plus/usage.sqlite"
+        db_path.parent.mkdir(parents=True)
+        self.db = sqlite3.connect(db_path)
+        self.db.executescript(USAGE_SCHEMA)
+        self.home = home
+
+    def tearDown(self):
+        self.db.close()
+        self.tmp.cleanup()
+
+    def scrape(self, mod):
+        m = mod.Metrics()
+        mod.collect_usage(m)
+        return {s: v for s, v in (l for l in m.lines if not isinstance(l, str))}
+
+    def requests(self, out):
+        return sum(v for s, v in out.items() if s.startswith("cliproxy_requests_total{"))
+
+    def test_counters_never_drop_when_old_events_are_archived(self):
+        # CPA-Manager-Plus archives by deleting old usage_events rows. A counter that drops
+        # reads as a reset to Prometheus and rate() shows a false spike.
+        mod = load_exporter(self.home)
+        add_events(self.db, 5)
+        self.assertEqual(self.requests(self.scrape(mod)), 5)
+        self.db.execute("DELETE FROM usage_events WHERE id <= 3")
+        self.db.commit()
+        add_events(self.db, 2)
+        self.assertEqual(self.requests(self.scrape(mod)), 7)
+
+    def test_incremental_scrapes_match_a_full_aggregation(self):
+        mod = load_exporter(self.home)
+        add_events(self.db, 4)
+        self.scrape(mod)
+        add_events(self.db, 3, tokens=5000)  # above the 1000-token context tier: its own price band
+        add_events(self.db, 2, account="other")
+        incremental = self.scrape(mod)
+        fresh = self.scrape(load_exporter(self.home))  # a new process does one full pass
+        self.assertEqual(incremental, fresh)
+        self.assertEqual(self.requests(incremental), 9)
+
+    def test_rewritten_token_columns_are_picked_up_after_a_migration(self):
+        # The cache-accounting migration rewrites normalized tokens on existing rows; the
+        # running sums must be rebuilt rather than keep the old values.
+        mod = load_exporter(self.home)
+        add_events(self.db, 2)
+        before = self.scrape(mod)
+        self.db.execute("UPDATE usage_events SET normalized_uncached_input_tokens = 0")
+        self.db.execute("UPDATE usage_data_migrations SET applied_rows = 2, updated_at_ms = 2")
+        self.db.commit()
+        after = self.scrape(mod)
+        cost = lambda out: sum(v for s, v in out.items() if s.startswith("cliproxy_api_equivalent_cost_usd_total{"))
+        self.assertLess(cost(after), cost(before))
+        self.assertEqual(cost(after), cost(self.scrape(load_exporter(self.home))))
+
+
+def health_payload():
+    return {"schema_version": 1, "rate_book_loaded": False, "client_aliases_loaded": False,
+            "sources": [
+                {"instance": "claude-primary", "subscribed": True, "last_event_age_seconds": 1.5},
+                {"instance": "codex-primary", "subscribed": False, "last_event_age_seconds": None}]}
+
+
+class ExporterUsageHealth(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(dir="/dev/shm")
-        self.home = Path(self.tmp.name)
-        self.mod = load_exporter(self.home)
+        self.mod = load_exporter(Path(self.tmp.name))
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def scrape(self, data=None):
-        data = usage_payload() if data is None else data
+    def test_adds_only_health_and_ignores_counter_configuration_readiness(self):
         m = self.mod.Metrics()
-        with patch.object(self.mod, "http_ok", return_value=(True, json.dumps(data).encode())) as fetch:
-            self.mod.collect_usage(m)
-        fetch.assert_called_once_with("http://127.0.0.1:18320/v1/exporter",
-                                      {"Authorization": "Bearer test-key"})
-        return m, {s: v for s, v in (l for l in m.lines if not isinstance(l, str))}
+        with patch.object(self.mod, 'http_ok', return_value=(True, json.dumps(health_payload()).encode())) as get:
+            self.mod.collect_usage_health(m)
+            self.mod.fetch_usage(m)
+        get.assert_called_once_with('http://127.0.0.1:18320/v1/exporter', {'Authorization': 'Bearer test-key'}, timeout=4)
+        values = {line[0]: line[1] for line in m.lines if isinstance(line, list)}
+        self.assertEqual(set(values), {
+            'cliproxy_up{service="usage"}',
+            'cliproxy_usage_source_subscribed{instance="claude-primary"}',
+            'cliproxy_usage_source_subscribed{instance="codex-primary"}',
+            'cliproxy_usage_source_last_event_age_seconds{instance="claude-primary"}',
+            'cliproxy_usage_source_last_event_age_seconds{instance="codex-primary"}'})
+        self.assertEqual(values['cliproxy_up{service="usage"}'], 1)
+        self.assertEqual(values['cliproxy_usage_source_subscribed{instance="claude-primary"}'], 1)
+        self.assertEqual(values['cliproxy_usage_source_subscribed{instance="codex-primary"}'], 0)
+        self.assertEqual(values['cliproxy_usage_source_last_event_age_seconds{instance="claude-primary"}'], 1.5)
+        self.assertTrue(math.isnan(values['cliproxy_usage_source_last_event_age_seconds{instance="codex-primary"}']))
+        self.assertIn(' NaN', m.text())
 
-    def test_every_legacy_usage_series_keeps_its_name_labels_units_and_value(self):
-        m, out = self.scrape()
-        base = 'provider="claude",model="m1",account="acct",client="Work laptop"'
-        expected = {
-            f'cliproxy_requests_total{{status="success",{base}}}': 5,
-            f'cliproxy_latency_seconds_sum{{{base}}}': 2.5,
-            f'cliproxy_latency_seconds_count{{{base}}}': 5,
-            f'cliproxy_ttft_seconds_sum{{{base}}}': 0.4,
-            f'cliproxy_ttft_seconds_count{{{base}}}': 2,
-            f'cliproxy_zero_token_success_total{{{base}}}': 1,
-            f'cliproxy_api_equivalent_cost_usd_total{{{base}}}': 1.25,
-            'cliproxy_last_request_timestamp_seconds': 1700000000.123,
-            'cliproxy_models_priced': 34,
-        }
-        for kind, value in (("input", 123), ("output", 45), ("cached", 6), ("reasoning", 7)):
-            expected[f'cliproxy_tokens_total{{type="{kind}",{base}}}'] = value
-        for kind, value in (("read", 80), ("write", 9)):
-            expected[f'cliproxy_cache_tokens_total{{type="{kind}",{base}}}'] = value
-        self.assertEqual({k: v for k, v in out.items() if not k.startswith("cliproxy_usage_source_")}, expected)
-        self.assertEqual(out['cliproxy_usage_source_subscribed{instance="claude-primary"}'], 1)
-        self.assertEqual(out['cliproxy_usage_source_subscribed{instance="codex-primary"}'], 0)
-        self.assertEqual(out['cliproxy_usage_source_last_event_age_seconds{instance="claude-primary"}'], 1.5)
-        self.assertTrue(math.isnan(out['cliproxy_usage_source_last_event_age_seconds{instance="codex-primary"}']))
-        self.assertIn('cliproxy_usage_source_last_event_age_seconds{instance="codex-primary"} NaN', m.text())
-        self.assertIn('# TYPE cliproxy_requests_total counter', m.text())
-        self.assertIn('# TYPE cliproxy_models_priced gauge', m.text())
-
-    def test_failed_groups_add_to_shared_counters_without_adding_a_status_label(self):
-        data = usage_payload()
-        failed = copy.deepcopy(data["groups"][0]); failed["status"] = "failed"
-        data["groups"].append(failed)
-        _, out = self.scrape(data)
-        requests = {k: v for k, v in out.items() if k.startswith("cliproxy_requests_total")}
-        self.assertEqual(len(requests), 2)
-        for name in ("cliproxy_tokens_total", "cliproxy_cache_tokens_total", "cliproxy_latency_seconds_sum"):
-            self.assertTrue(all('status=' not in k for k in out if k.startswith(name)))
-        self.assertEqual(sum(v for k, v in out.items() if k.startswith("cliproxy_api_equivalent_cost_usd_total")), 2.5)
-
-    def test_unpriced_cost_is_absent_and_explicit_zero_cost_is_preserved(self):
-        data = usage_payload(); data["groups"][0]["cost_usd"] = None
-        _, out = self.scrape(data)
-        self.assertFalse(any(k.startswith("cliproxy_api_equivalent_cost_usd_total") for k in out))
-        data["groups"][0]["cost_usd"] = 0
-        _, out = self.scrape(data)
-        self.assertEqual(sum(v for k, v in out.items() if k.startswith("cliproxy_api_equivalent_cost_usd_total")), 0)
-        self.assertTrue(any(k.startswith("cliproxy_api_equivalent_cost_usd_total") for k in out))
-
-    def test_counters_are_transported_without_local_repricing_or_a_private_cache(self):
-        first = usage_payload(); self.scrape(first)
-        changed = usage_payload(); changed["groups"][0]["cost_usd"] = 3.75
-        changed["groups"][0]["tokens"]["input"] = 2**40 + 1
-        _, out = self.scrape(changed)
-        self.assertEqual(sum(v for k, v in out.items() if k.startswith("cliproxy_api_equivalent_cost_usd_total")), 3.75)
-        self.assertEqual(sum(v for k, v in out.items() if k.startswith("cliproxy_tokens_total{type=\"input\"")), 2**40 + 1)
-        source = SCRIPT.read_text()
-        for removed in ("sqlite3", "usage_events", "load_prices", "api_key_aliases", "USAGE_GROUPS_SQL"):
-            self.assertNotIn(removed, source)
-
-    def test_malformed_or_unready_responses_publish_no_partial_usage(self):
-        for mutate in (lambda d: d.update(schema_version=2),
-                       lambda d: d.update(missing_reported_counters=1),
-                       lambda d: d["groups"].append({}),
-                       lambda d: d["sources"][0].update(subscribed="yes"),
-                       lambda d: d["groups"][0].update(requests=float("nan"))):
-            data = usage_payload(); mutate(data)
-            m = self.mod.Metrics()
-            with patch.object(self.mod, "http_ok", return_value=(True, json.dumps(data).encode())):
-                with self.assertRaises((ValueError, KeyError, TypeError)):
-                    self.mod.collect_usage(m)
-            self.assertEqual(m.lines, [])
-        with patch.object(self.mod, "http_ok", return_value=(False, b"secret response must stay hidden")):
-            with self.assertRaisesRegex(RuntimeError, "^prox-usage exporter unavailable$"):
-                self.mod.collect_usage(self.mod.Metrics())
-
-    def test_health_uses_usage_healthz_and_tolerates_a_retired_dashboard(self):
-        calls = []
-        def get(url, headers=None, timeout=5):
-            calls.append(url)
-            if url.endswith('/v1/exporter'):
-                return True, json.dumps(usage_payload()).encode()
-            return url == self.mod.USAGE + '/healthz', b'{}'
-        self.mod.PROXIES = {}
-        with patch.object(self.mod, 'http_ok', side_effect=get), \
-             patch.object(self.mod, 'collect_quota'), patch.object(self.mod, 'collect_credentials'), \
-             patch.object(self.mod, 'collect_plans'):
-            text = self.mod.render()
-        self.assertIn('cliproxy_up{service="usage"} 1', text)
-        self.assertIn('cliproxy_up{service="dashboard"} 0', text)
-        self.assertIn('cliproxy_exporter_collector_success{collector="usage"} 1', text)
-        self.assertEqual(calls.count(self.mod.USAGE + '/v1/exporter'), 1)
-        self.assertIn(self.mod.USAGE + '/healthz', calls)
-        self.assertIn(self.mod.DASHBOARD + '/health', calls)
-        self.assertFalse(any('/management.html' in url for url in calls))
-        with patch('sys.stderr', new=io.StringIO()), \
-             patch.object(self.mod, 'http_ok', return_value=(False, b'')), \
-             patch.object(self.mod, 'collect_quota'), patch.object(self.mod, 'collect_credentials'), \
-             patch.object(self.mod, 'collect_plans'):
-            text = self.mod.render()
-        self.assertIn('cliproxy_up{service="usage"} 0', text)
-        self.assertIn('cliproxy_exporter_collector_success{collector="usage"} 0', text)
-        self.assertNotIn('cliproxy_requests_total', text)
-
-    def test_real_loopback_read_sends_the_bearer_once(self):
-        requests = []
-        class UsageStub(BaseHTTPRequestHandler):
+    def test_slow_usage_read_has_one_deadline_and_other_collectors_still_render(self):
+        release = threading.Event()
+        seen = []
+        class Slow(BaseHTTPRequestHandler):
             def do_GET(handler):
-                requests.append((handler.path, handler.headers.get('Authorization')))
-                body = json.dumps(usage_payload()).encode()
-                handler.send_response(200); handler.end_headers(); handler.wfile.write(body)
+                seen.append((handler.path, handler.headers.get('Authorization')))
+                release.wait(10)
+                try:
+                    handler.send_response(200); handler.end_headers(); handler.wfile.write(b'{}')
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
             def log_message(self, *args):
                 pass
-        server = HTTPServer(('127.0.0.1', 0), UsageStub)
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Slow)
         thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
         self.mod.USAGE = f'http://127.0.0.1:{server.server_port}'
+        self.mod.PROXIES = {}
+        calls = []
         try:
-            m = self.mod.Metrics(); self.mod.collect_usage(m)
-            self.assertTrue(m.series)
+            with patch.object(self.mod, 'collect_usage', side_effect=lambda m: calls.append('usage')), \
+                 patch.object(self.mod, 'collect_quota', side_effect=lambda m: calls.append('quota')), \
+                 patch.object(self.mod, 'collect_credentials', side_effect=lambda m: calls.append('credentials')), \
+                 patch.object(self.mod, 'collect_plans', side_effect=lambda m: calls.append('plans')):
+                # Dashboard stays on its original probe; intercept only that request.
+                original = self.mod.http_ok
+                def get(url, *args, **kwargs):
+                    if url.startswith(self.mod.DASHBOARD):
+                        return False, b''
+                    return original(url, *args, **kwargs)
+                with patch.object(self.mod, 'http_ok', side_effect=get), patch('sys.stderr'):
+                    start = time.monotonic(); text = self.mod.render(); elapsed = time.monotonic()-start
+            self.assertLess(elapsed, 4.8)
+            self.assertIn('cliproxy_up{service="usage"} 0', text)
+            self.assertEqual(calls, ['usage', 'quota', 'credentials', 'plans'])
+            self.assertEqual(seen, [('/v1/exporter', 'Bearer test-key')])
+            self.assertNotIn('test-key', seen[0][0])
         finally:
-            server.shutdown(); server.server_close(); thread.join()
-        self.assertEqual(requests, [('/v1/exporter', 'Bearer test-key')])
+            release.set(); server.shutdown(); server.server_close(); thread.join()
 
 
 if __name__ == "__main__":
