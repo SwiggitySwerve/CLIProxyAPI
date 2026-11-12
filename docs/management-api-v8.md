@@ -261,6 +261,20 @@ restart; deployments with multiple independent instances require session affinit
 
 Query local SIWC status for a Codex credential with `GET /v8/management/oauth/siwc/status?name=<name>` (or `?auth_index=<auth_index>`). The endpoint reads local credentials and runtime rejection state without triggering refresh or upstream verification requests, and returns `{"status": "off" | "valid" | "invalid"}`.
 
+`GET /credentials` lists API keys defined in config (for example
+`claude-api-key` and `codex-api-key` entries) next to auth-file credentials. Every
+entry has `kind`: `auth_file` or `config_api_key`. Config API-key entries also
+report `source: "config"` and `account_type: "api_key"`, and carry the same
+runtime state fields (`status`, `next_retry_after`, `quota`, `model_quotas`,
+`priority`, `cooldowns`) as file-backed entries. The key itself is never listed,
+and `account` is omitted for them. Their `id` and `name` are the runtime auth ID,
+a hash-derived string. The v0 listing is unchanged and does not include them.
+
+File-oriented mutations still refuse these entries: `PATCH /credentials/fields`
+and `DELETE /credentials` return `404`, because config API keys are edited through
+`/config/...`. `PATCH /credentials/status` keeps its existing behaviour of toggling
+the key's `excluded-models: ["*"]` entry in config.
+
 Every `GET /credentials` entry includes `instance_id` (string) when the process
 has a valid `CLIPROXY_INSTANCE_ID` (the same value that labels usage-queue
 records: lowercase letters, digits and `-`, starting with a letter, at most 64
