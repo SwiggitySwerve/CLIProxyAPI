@@ -22,7 +22,7 @@ import (
 //  2. a known future reset time: soonest first;
 //  3. observed recently but without a usable reset time: last.
 //
-// The reset time comes from a per-provider function (soonestResetWindows) that
+// The reset time comes from a per-provider function (providerQuota.resetWindow) that
 // names the quota windows it reads. Claude: 7d_oi (only for models it covers), 7d,
 // then unified; 5h is named but never ranked on. Codex: secondary, then primary.
 // A provider without an entry has no reset time, so its credentials are ranked
@@ -54,13 +54,6 @@ const maxQuotaResetHorizon = 31 * 24 * time.Hour
 // name of the window it came from, given the credential's observed signals and the
 // requested model. The bool is false when no usable reset time exists.
 type soonestResetWindowFunc func(signals map[string]string, observedAt time.Time, model string) (time.Time, string, bool)
-
-// soonestResetWindows maps a lower-case provider to its window function. Signals
-// are collected per provider, so each function reads only its own header names.
-var soonestResetWindows = map[string]soonestResetWindowFunc{
-	"claude": claudeResetWindow,
-	"codex":  codexResetWindow,
-}
 
 // Claude windows (Anthropic-Ratelimit-Unified-<window>-Reset, epoch seconds).
 const (
@@ -169,14 +162,15 @@ func soonestResetRank(auth *Auth, model string, now time.Time) (int, time.Time) 
 
 // soonestResetWindow returns the reset time to rank a credential of the provider
 // on and the window it came from. Unparsable, negative, zero epoch or
-// out-of-horizon values are skipped; a provider without an entry in
-// soonestResetWindows has no reset time.
+// out-of-horizon values are skipped; a provider without a resetWindow in the
+// provider registry has no reset time. Signals are collected per provider, so
+// each window function reads only its own header names.
 func soonestResetWindow(provider string, signals map[string]string, observedAt time.Time, model string) (time.Time, string, bool) {
 	if len(signals) == 0 || observedAt.IsZero() {
 		return time.Time{}, "", false
 	}
-	windowFor, ok := soonestResetWindows[strings.ToLower(strings.TrimSpace(provider))]
-	if !ok {
+	windowFor := providerQuotaFor(provider).resetWindow
+	if windowFor == nil {
 		return time.Time{}, "", false
 	}
 	return windowFor(signals, observedAt, model)
