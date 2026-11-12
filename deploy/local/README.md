@@ -38,6 +38,19 @@ deploy/local/staging/down.sh [--purge]   # --purge also deletes the data dir and
 All scripts are idempotent and refuse names or ports outside staging (for example 8317,
 8318, 8319, 9787, 18317).
 
+Several stacks can run at once: set `STAGING_NAME=<name>` (`[a-z0-9]+`, not `mock` or
+`pod`) plus distinct `STAGING_PROXY_PORT` / `STAGING_MOCK_PORT` for every script, including
+`scenarios/*` and `bin/roll.sh staging`. The pod becomes `cli-proxy-staging-<name>-pod`, the
+containers `cli-proxy-staging-<name>` and `cli-proxy-staging-<name>-mock`, and the data dir
+defaults to `~/.local/share/cli-proxy-staging-<name>/`. Unset keeps the names above. `up.sh`
+refuses a concurrent run for the same name, and refuses a pod already owned by a different
+data dir or ports, so two agents cannot clobber each other's containers.
+
+```bash
+export STAGING_NAME=f7a STAGING_PROXY_PORT=18351 STAGING_MOCK_PORT=18352
+deploy/local/staging/up.sh && deploy/local/staging/scenarios/cooldown-basic.sh
+```
+
 `up.sh` renders `config.template.yaml` into the data dir and generates a random
 management key and client key there (mode 600, never in the repo). The config mirrors
 the live Claude instance's routing: `strategy: soonest-reset`, session affinity on,

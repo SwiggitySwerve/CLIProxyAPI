@@ -2,8 +2,14 @@
 # up.sh [git-ref|worktree]: build the proxy image from a git ref (or the current
 # worktree, the default) and start the staging pod: proxy + mock upstream.
 # Idempotent: re-running rebuilds if needed and recreates the two containers.
+# STAGING_NAME=<name> runs a separate stack (see lib.sh). A concurrent up.sh for the
+# same name is refused, and so is a pod owned by a different data dir or ports.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
+
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/$POD.lock"
+flock -n 9 || die "another up.sh for staging '${NAME:-default}' is running; use a distinct STAGING_NAME"
+if pod_exists "$POD"; then guard_pod_owner; fi
 
 SRC=${1:-worktree}
 BUILD_CTX=$REPO_ROOT
