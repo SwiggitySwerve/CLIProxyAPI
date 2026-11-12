@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/providerspec"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 )
 
@@ -519,28 +520,15 @@ func modelAliasChannel(auth *Auth) string {
 // and auth kind. Returns empty string if the provider/authKind combination doesn't support
 // OAuth model alias (e.g., API key authentication).
 //
-// Built-in channels: vertex, aistudio, antigravity, claude, codex, kimi, xai, meta.
-// Plugin OAuth providers use their normalized provider key as the channel.
+// Every other provider, built-in or plugin, uses its normalized provider name
+// as the channel; providerspec.Spec.NoOAuthModelAlias marks the exceptions.
 func OAuthModelAliasChannel(provider, authKind string) string {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	authKind = normalizeOAuthModelAliasAuthKind(authKind)
-	if authKind == "apikey" {
+	if authKind == "apikey" || providerspec.For(provider).NoOAuthModelAlias {
 		return ""
 	}
-	switch provider {
-	case "gemini":
-		return ""
-	case "vertex":
-		return "vertex"
-	case "claude":
-		return "claude"
-	case "codex":
-		return "codex"
-	case "aistudio", "antigravity", "kimi", "kimi-ai", "kimi.ai", "kimi.com", "xai", "meta":
-		return provider
-	default:
-		return provider
-	}
+	return provider
 }
 
 func normalizeOAuthModelAliasAuthKind(authKind string) string {

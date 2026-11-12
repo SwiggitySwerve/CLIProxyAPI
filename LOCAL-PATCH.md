@@ -322,12 +322,43 @@ plus three provider-keyed maps. Grouped by the decision they make:
      (gemini skip): auth-file format parsing, each tied to that provider's file shape.
    - `sdk/cliproxy/service_auth.go` websocket teardown on removal: executor wiring
      (group 6).
-5. **Model catalog source (slice 5).** `sdk/cliproxy/service_models.go:114-200,229,240,342`;
-   `internal/registry/model_definitions.go:572-590` `GetStaticModelDefinitionsByChannel`;
-   `sdk/cliproxy/auth/conductor_models.go:541-561,701-721,837-847`;
-   `api_key_model_capabilities.go:373-399`; `oauth_model_alias.go:531-539`;
-   `sdk/cliproxy/antigravity_models.go:479,619,654`; `internal/registry/model_registry.go:342-344,2007,2034`;
-   `internal/client/codex/models/models.go:350,356`; `internal/api/server_routes.go:833,864`.
+5. **Model catalog source (slice 5, done; 5b open).** `internal/providerspec` `Spec`
+   gained three fields:
+   - `ModelCatalog` and `ModelCatalogAliases`, read through `providerspec.ModelCatalog`:
+     which built-in static catalog a provider name or alias reads (`gemini-interactions`
+     reads `gemini`; `kimi-ai`, `kimi.ai`, `kimi.com` read `kimi`; `x-ai` and `grok` read
+     `xai`, but `x.ai` reads none; `muse` reads `meta`). `internal/registry`
+     `GetStaticModelDefinitionsByChannel` now switches on the catalog name only, mapping
+     each catalog to its model getter; `LookupStaticModelInfoByChannel` and the
+     management static-definitions handler reach it through that function.
+   - `NoOAuthModelAlias` (gemini): `oauth_model_alias.go` `OAuthModelAliasChannel`, whose
+     switch returned the provider name for every other provider.
+   Tests: `internal/registry/provider_catalog_characterization_test.go` and
+   `sdk/cliproxy/auth/provider_catalog_characterization_test.go`.
+   Left as switches, with the reason:
+   - `sdk/cliproxy/service_models.go` `registerModelsForAuthWithConfigAndCache`: each case
+     binds the provider's own config section (group 7: `resolveConfigXKeyForConfig`,
+     `buildXConfigModels`), the Codex plan-type catalog and the Antigravity remote
+     catalog path, so it is a method table. Its names differ from the static catalog
+     (`x-ai`, `grok`, `muse` fall through to OpenAI compatibility there), so it does not
+     read `ModelCatalog`. The `openai-compatibility` default branch is config (group 7).
+   - `sdk/cliproxy/auth/conductor_models.go` `configuredModelAliasEntries` and the
+     upstream-model switch, and `api_key_model_capabilities.go` the configured
+     capability switch: config key sections (group 7).
+   - `sdk/cliproxy/antigravity_models.go`: Antigravity's own remote catalog, provider-only
+     by definition (like SIWC in slice 4).
+   - `internal/registry/model_registry.go` model formatting by `"claude"`/`"gemini"`:
+     handler formats, not credential providers (group 8).
+   - `internal/client/codex/models/models.go` Devin detection: classifies a model by its
+     `type`, `owned_by` and id prefix (group 8), with one provider check below.
+   **Slice 5b (open).** Provider facts still written as literals:
+   - `internal/registry/model_registry.go` `responsesWebSearchProviderPathSupport`: whether
+     a provider's Responses path supports web search (yes, no, unknown), with its own
+     Kimi name family.
+   - `internal/api/server_routes.go` `formatHomeCodexModel` (a model served by Devin is
+     tagged `type: devin`) and `formatHomeCodexModelWithSettings` (Codex's OAuth settings
+     win over other providers'); `internal/client/codex/models/models.go` the same
+     Devin-provider check in `providersForModel`.
 6. **Executor and transport wiring (last; may stay a switch).**
    `sdk/cliproxy/service_executors.go:233,302-326,578`; `conductor_execution.go:480-494`
    provider to translator format; `scheduler.go:465` and `conductor_selection.go:2577`
@@ -348,11 +379,11 @@ plus three provider-keyed maps. Grouped by the decision they make:
    `internal/pluginhost/adapters.go:93` and `internal/auth/kimi/kimi.go:71` classify
    model families or domains.
 
-Slice order: 1, 2, 3, 4, 5, then decide on 6. Done: 1, 2, 2b, 3 and 4. Remaining: 5
-(model catalog source), then the decision on 6. Slices 1-3 extend the unexported
-`providerQuota` entry in `sdk/cliproxy/auth` (behaviour that needs auth types); slice 4
-added the exported static-facts registry `internal/providerspec`. Slice 5 should add its
-facts there when another package needs them.
+Slice order: 1, 2, 3, 4, 5, 5b, then decide on 6. Done: 1, 2, 2b, 3, 4 and 5.
+Remaining: 5b (web-search support and the Home Codex model list facts above), then the
+decision on 6. Slices 1-3 extend the unexported `providerQuota` entry in
+`sdk/cliproxy/auth` (behaviour that needs auth types); slices 4 and 5 add static facts to
+the exported `internal/providerspec`, which `internal/registry` can also import.
 
 ## Management key failures count distinct keys
 
