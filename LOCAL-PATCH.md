@@ -320,3 +320,34 @@ plus three provider-keyed maps. Grouped by the decision they make:
 Slice order: 1, 2, 3, 4, 5, then decide on 6. Slices 1-3 stay inside
 `sdk/cliproxy/auth` and extend the same `providerQuota` entry; slice 4 is where the
 registry first needs to be exported (management handlers are another package).
+
+## Management key failures count distinct keys
+
+`AuthenticateManagementKey` (`internal/api/handlers/management/handler.go`) bans a client
+address for 30 minutes after 5 failed management-key attempts. Upstream counts every
+attempt. Here each distinct wrong key (a SHA-256 of it, never the key) counts once per
+address until the next success or ban, and a missing key counts as one more key.
+
+Why: rootless podman delivers every host-side caller (the dashboard, a browser through it,
+local scripts, and LAN or tailnet clients through the published port) from the same
+address, `10.0.2.100`. On 2026-11-12 one page firing nine requests with a stale key banned
+that address, which locked every management client out of the hub for 30 minutes.
+Trusting that address instead would turn off brute-force protection for everyone, because
+remote callers arrive as the same address. Guessing still needs many distinct keys, so
+five of them still ban.
+
+Known limits:
+- A repeated wrong key is no longer throttled by a ban, so each repeat still runs one
+  bcrypt compare (about 45 ms when `secret-key` is a bcrypt hash). Accepted: it costs CPU,
+  not guessing strength.
+- A repeated key keeps its slot alive. Five *different* stale, missing or mistyped keys
+  from the shared address with no success in between still ban everyone on it.
+- Pre-existing, not changed here: any successful login from an address resets its
+  counter. On the shared `10.0.2.100`, a dashboard polling with the correct key keeps
+  resetting it, so the five-guesses-per-30-minutes bound does not hold for that address.
+  A fix would count per key fingerprint across successes; it is a separate decision.
+
+Tests: `TestAuthenticateManagementKey_RepeatedSameWrongKeyDoesNotBan`,
+`TestAuthenticateManagementKey_RepeatedKeysShareTheFiveSlots`,
+`TestAuthenticateManagementKey_LocalhostIPBan_BlocksCorrectKeyDuringBan` (now five
+distinct keys).
