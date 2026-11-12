@@ -86,12 +86,16 @@ func applyCooldownFields(dst *QuotaState, cooldown QuotaState) {
 	dst.cooldownEvaluated = cooldown.Exceeded || cooldown.cooldownEvaluated
 }
 
+// rejectedClaudeSignalsForCooldown returns the response's quota signals when
+// the provider's registry entry says they pin a cooldown. Only Claude has such
+// a rule today.
 func rejectedClaudeSignalsForCooldown(provider string, headers http.Header) map[string]string {
-	if !strings.EqualFold(strings.TrimSpace(provider), "claude") {
+	rejects := providerQuotaFor(provider).rejects
+	if rejects == nil {
 		return nil
 	}
-	signals := collectQuotaSignals("claude", headers)
-	if !hasRejectedClaudeUnifiedSignals(signals) {
+	signals := collectQuotaSignals(provider, headers)
+	if !rejects(signals) {
 		return nil
 	}
 	return signals
@@ -112,16 +116,20 @@ func sanitizePersistedClaudeCooldownSignals(raw map[string]string) map[string]st
 
 // collectQuotaSignals builds the bounded snapshot for a single response.
 func collectQuotaSignals(provider string, headers http.Header) map[string]string {
-	if len(headers) == 0 {
+	signalRank := providerQuotaFor(provider).signalRank
+	if len(headers) == 0 || signalRank == nil {
 		return nil
 	}
 	names := make([]string, 0, len(headers))
 	values := make(map[string]string, len(headers))
+	ranks := make(map[string]int, len(headers))
 	for key, headerValues := range headers {
 		canonicalKey := http.CanonicalHeaderKey(strings.TrimSpace(key))
-		if !isQuotaSignalHeaderForProvider(provider, canonicalKey) || len(headerValues) == 0 {
+		rank, ok := signalRank(strings.ToLower(canonicalKey))
+		if !ok || len(headerValues) == 0 {
 			continue
 		}
+		ranks[canonicalKey] = rank
 		value := strings.TrimSpace(headerValues[len(headerValues)-1])
 		if !validQuotaSignalValue(value) {
 			continue
@@ -137,7 +145,7 @@ func collectQuotaSignals(provider string, headers http.Header) map[string]string
 	// Rank then sort so truncation is deterministic and keeps credential-level
 	// watermarks (plan, credits, primary) ahead of additional-limit namespaces.
 	sort.Slice(names, func(i, j int) bool {
-		ri, rj := quotaSignalRetentionRank(names[i]), quotaSignalRetentionRank(names[j])
+		ri, rj := ranks[names[i]], ranks[names[j]]
 		if ri != rj {
 			return ri < rj
 		}
@@ -168,53 +176,42 @@ func validQuotaSignalValue(value string) bool {
 	return true
 }
 
-func quotaSignalRetentionRank(name string) int {
-	lower := strings.ToLower(strings.TrimSpace(name))
-	switch {
-	case lower == "retry-after", strings.HasPrefix(lower, "anthropic-ratelimit-unified-"):
-		return 0
-	case lower == "x-codex-plan-type", lower == "x-codex-active-limit", strings.HasPrefix(lower, "x-codex-credits-"):
-		return 1
-	case lower == "x-codex-allowed", lower == "x-codex-limit-reached",
-		strings.HasPrefix(lower, "x-codex-primary-"), strings.HasPrefix(lower, "x-codex-secondary-"):
-		return 2
-	case strings.HasPrefix(lower, "x-codex-code-review-"):
-		return 3
-	case strings.HasPrefix(lower, "x-codex-additional-"):
-		return 5
-	case strings.HasPrefix(lower, "x-codex-"):
-		return 4
-	default:
-		return 6
-	}
+// claudeSignalRank is Claude's quota-signal allowlist (registry signalRank).
+// Every signal ranks equally, so past the cap they are kept by name.
+func claudeSignalRank(name string) (int, bool) {
+	return 0, name == "retry-after" || strings.HasPrefix(name, "anthropic-ratelimit-unified-")
 }
 
-func isQuotaSignalHeaderForProvider(provider, name string) bool {
-	provider = strings.ToLower(strings.TrimSpace(provider))
-	name = strings.ToLower(strings.TrimSpace(name))
-	if name == "retry-after" {
-		return provider == "claude" || provider == "codex"
-	}
-	if strings.HasPrefix(name, "anthropic-ratelimit-unified-") {
-		return provider == "claude"
-	}
-	if strings.HasPrefix(name, "x-ratelimit-") {
+// codexSignalRank is Codex's quota-signal allowlist (registry signalRank).
+func codexSignalRank(name string) (int, bool) {
+	switch {
+	case name == "retry-after":
+		return 0, true
+	case strings.HasPrefix(name, "x-ratelimit-"):
 		// Observed Codex responses do not carry x-ratelimit-* headers; the only
 		// upstream seen emitting them is Grok, which is excluded from quota
 		// observation. The rule is kept so a future Codex rollout is captured
 		// without another change, but it is expected to be inert today.
-		return provider == "codex"
+		return 6, true
+	case !strings.HasPrefix(name, "x-codex-"):
+		return 0, false
+	case name == "x-codex-plan-type", name == "x-codex-active-limit", strings.HasPrefix(name, "x-codex-credits-"):
+		return 1, true
+	case !hasCodexLimitMarker(name):
+		return 0, false
+	case name == "x-codex-allowed", name == "x-codex-limit-reached",
+		strings.HasPrefix(name, "x-codex-primary-"), strings.HasPrefix(name, "x-codex-secondary-"):
+		return 2, true
+	case strings.HasPrefix(name, "x-codex-code-review-"):
+		return 3, true
+	case strings.HasPrefix(name, "x-codex-additional-"):
+		return 5, true
+	default:
+		return 4, true
 	}
-	if !strings.HasPrefix(name, "x-codex-") {
-		return false
-	}
-	if provider != "codex" {
-		return false
-	}
-	if name == "x-codex-active-limit" || name == "x-codex-plan-type" ||
-		strings.HasPrefix(name, "x-codex-credits-") {
-		return true
-	}
+}
+
+func hasCodexLimitMarker(name string) bool {
 	// Codex namespaces each additional limit by a short name on the HTTP path
 	// (x-codex-bengalfox-primary-used-percent) and by limit name on the
 	// websocket path (x-codex-additional-<limit>-primary-used-percent), so the

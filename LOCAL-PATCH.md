@@ -255,11 +255,30 @@ plus three provider-keyed maps. Grouped by the decision they make:
    - `quota_all_cooled.go:28` `allCooledTrialVerdicts` (claude), read at :151, :185, :202.
    - `conductor.go:290-291` default `QuotaRecheckAdapter`s registered by `NewManager`.
    Tests: `provider_quota_characterization_test.go`.
-2. **Quota-signal parsing into named windows (slice 2).** `quota_signals.go:196-242`
-   `isQuotaSignalHeaderForProvider` (per-provider header allowlist), `:175`
-   `quotaSignalRetentionRank`, `:94-116` `rejectedClaudeSignalsForCooldown` and
-   `sanitizePersistedClaudeCooldownSignals`; `quota_recheck_schedule.go:57` Codex
-   cadence defaults; `internal/config/quota_reconcile.go:45,91` legacy `true` = codex.
+2. **Quota-signal parsing into named windows (slice 2, done except 2b).** The
+   `providerQuota` entry gained three fields (`provider_registry.go:16-25`):
+   - `signalRank`: the per-provider header allowlist and retention rank, formerly
+     `isQuotaSignalHeaderForProvider` and `quotaSignalRetentionRank`. Now
+     `quota_signals.go:181` `claudeSignalRank` and `:186` `codexSignalRank` (+ `:214`
+     `hasCodexLimitMarker`), read by `collectQuotaSignals` at `:118`.
+   - `rejects`: Claude's `hasRejectedClaudeUnifiedSignals`, read by
+     `rejectedClaudeSignalsForCooldown` at `quota_signals.go:92`.
+     `sanitizePersistedClaudeCooldownSignals` (`:104`) keeps its Claude-only
+     unified-prefix filter and reaches the rule through that function. Both keep
+     their names, so their `conductor_cooldown.go` call sites are untouched.
+   - `recheckCadence`: Codex's probe-every-pass default, read by
+     `quotaRecheckPolicyFor` at `quota_recheck_schedule.go:61`. Providers without
+     one keep the slow `claudeRecheck*` defaults (`:20-22`).
+   Tests: the `SignalAllowlist`, `SignalRetentionOrder`, `RejectedCooldownSignals` and
+   `RecheckCadence` cases in `provider_quota_characterization_test.go`.
+
+   **Slice 2b (not done): legacy `quota-reconcile: true` = codex clear**,
+   `internal/config/quota_reconcile.go:45` (parse) and `:91` (save back as `true`).
+   `internal/config` cannot import `sdk/cliproxy/auth` (auth imports config), so the
+   registry cannot answer there. The options are a config-package hook that auth's
+   `init` sets, or storing a legacy marker that auth resolves. The marker would
+   change the `QuotaReconcileConfig` value that management JSON and `MarshalYAML`
+   expose. Both cost more than the single literal they replace, so it stays in config.
 3. **429 classification and cooldown scope (slice 3).** `selector.go:666`
    `claudeUnifiedCooldownForAuth`; `scheduler.go:1641` `claudeCooldownSummaryLocked`;
    `conductor_cooldown.go:399,492` restore of Claude cooldown signals and `:1237,1282,1474`

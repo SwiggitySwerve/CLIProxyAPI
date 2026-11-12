@@ -7,12 +7,22 @@ import (
 
 // providerQuota is one provider's entry in the provider registry: which quota
 // signals it exposes and how the hub reads and rechecks them. It is the first
-// slice of the provider adapter contract (roadmap 3.2); later slices add the
-// header allowlist, 429 classification and the model catalog source.
+// part of the provider adapter contract (roadmap 3.2); later slices add 429
+// classification and the model catalog source.
 type providerQuota struct {
 	// observes reports that responses carry a passive credential-level quota
 	// snapshot (ProviderSupportsQuotaObservation).
 	observes bool
+	// signalRank reports whether a lower-case response header name is one of
+	// the provider's quota signals and its retention rank: past the header cap
+	// lower ranks are kept first (collectQuotaSignals). Nil means no header is.
+	signalRank func(name string) (rank int, ok bool)
+	// rejects reports that collected signals pin a cooldown to the provider's
+	// own reset (rejectedClaudeSignalsForCooldown). Nil means none do.
+	rejects func(signals map[string]string) bool
+	// recheckCadence is the recheck cadence used when the configured mode sets
+	// no durations. Nil means the slow default (quotaRecheckPolicyFor).
+	recheckCadence *quotaRecheckCadence
 	// resetWindow returns the reset time soonest-reset ranks on. Nil means the
 	// provider has no reset time and ranks like fill-first.
 	resetWindow soonestResetWindowFunc
@@ -46,14 +56,20 @@ func providerQuotaFor(provider string) providerQuota {
 func init() {
 	registerProviderQuota("claude", providerQuota{
 		observes:     true,
+		signalRank:   claudeSignalRank,
+		rejects:      hasRejectedClaudeUnifiedSignals,
 		resetWindow:  claudeResetWindow,
 		recheck:      claudeQuotaRecheckAdapter{},
 		trialVerdict: claudeTrialVerdict,
 	})
 	registerProviderQuota("codex", providerQuota{
 		observes:    true,
+		signalRank:  codexSignalRank,
 		resetWindow: codexResetWindow,
 		recheck:     codexQuotaRecheckAdapter{},
+		// The original loop: probe a cooled credential on every pass, limited
+		// only by quotaProbeMinGap.
+		recheckCadence: &quotaRecheckCadence{interval: quotaProbeMinGap, nearInterval: quotaProbeMinGap},
 	})
 	// Devin observes, but no Devin header is on the signal allowlist yet, so a
 	// response never replaces its snapshot.
