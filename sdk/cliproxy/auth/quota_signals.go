@@ -183,6 +183,9 @@ func claudeSignalRank(name string) (int, bool) {
 }
 
 // codexSignalRank is Codex's quota-signal allowlist (registry signalRank).
+// Case order is load-bearing: the reject guards for non-x-codex names and for
+// x-codex names without a limit marker sit between rank cases, so moving a case
+// across them changes which headers are kept.
 func codexSignalRank(name string) (int, bool) {
 	switch {
 	case name == "retry-after":

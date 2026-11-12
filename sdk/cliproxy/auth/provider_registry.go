@@ -19,6 +19,10 @@ type providerQuota struct {
 	signalRank func(name string) (rank int, ok bool)
 	// rejects reports that collected signals pin a cooldown to the provider's
 	// own reset (rejectedClaudeSignalsForCooldown). Nil means none do.
+	// Its consumers are still Claude-specific until slice 3: persisted cooldown
+	// signals keep only anthropic-ratelimit-unified-* keys
+	// (sanitizePersistedClaudeCooldownSignals), and the selector reads them with
+	// hasRejectedClaudeUnifiedSignals.
 	rejects func(signals map[string]string) bool
 	// recheckCadence is the recheck cadence used when the configured mode sets
 	// no durations. Nil means the slow default (quotaRecheckPolicyFor).
