@@ -1367,6 +1367,9 @@ func TestServicePreservesActiveScopeDuringPreACKFailoverRetries(t *testing.T) {
 }
 
 func TestServiceHeartbeatFailoverDoesNotDrainBlockingScope(t *testing.T) {
+	// Failover waits out a jittered retry delay of up to homeSubscriberRetryInitial,
+	// so these bounds only guard against a hang.
+	const eventTimeout = 5 * homeSubscriberRetryInitial
 	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
 	if errListen != nil {
 		t.Fatalf("listen: %v", errListen)
@@ -1387,7 +1390,7 @@ func TestServiceHeartbeatFailoverDoesNotDrainBlockingScope(t *testing.T) {
 			if errAccept != nil {
 				return
 			}
-			go serveRegistryTestHomeConnection(conn, &subscriptionMu, &subscriptions, firstAck, loseFirst, secondSubscribe, &secondSubscribeOnce, allowSecondAck, stop)
+			go serveRegistryTestHomeConnectionWithHeartbeat(conn, "30s", true, &subscriptionMu, &subscriptions, firstAck, loseFirst, secondSubscribe, &secondSubscribeOnce, allowSecondAck, stop)
 		}
 	}()
 	t.Cleanup(func() {
@@ -1420,10 +1423,10 @@ func TestServiceHeartbeatFailoverDoesNotDrainBlockingScope(t *testing.T) {
 
 	select {
 	case <-firstAck:
-	case <-time.After(time.Second):
+	case <-time.After(eventTimeout):
 		t.Fatal("first subscription was not acknowledged")
 	}
-	registry := waitForServiceRegistry(t, service, time.Second)
+	registry := waitForServiceRegistry(t, service, eventTimeout)
 	pending, errBegin := registry.BeginDispatch()
 	if errBegin != nil {
 		t.Fatal(errBegin)
@@ -1450,7 +1453,7 @@ func TestServiceHeartbeatFailoverDoesNotDrainBlockingScope(t *testing.T) {
 	}
 	select {
 	case <-secondSubscribe:
-	case <-time.After(time.Second):
+	case <-time.After(eventTimeout):
 		t.Fatal("new subscription did not start while the old scope remained active")
 	}
 	service.homeMu.Lock()
@@ -1460,7 +1463,7 @@ func TestServiceHeartbeatFailoverDoesNotDrainBlockingScope(t *testing.T) {
 		t.Fatal("registry was exposed before the replacement ACK")
 	}
 	close(allowSecondAck)
-	if nextRegistry := waitForServiceRegistry(t, service, time.Second); nextRegistry != registry {
+	if nextRegistry := waitForServiceRegistry(t, service, eventTimeout); nextRegistry != registry {
 		t.Fatal("heartbeat failover replaced the registry containing the active scope")
 	}
 	select {
@@ -2584,6 +2587,13 @@ func serveInitialOverlayPluginConnection(conn net.Conn, pluginSync chan struct{}
 }
 
 func serveRegistryTestHomeConnection(conn net.Conn, subscriptionMu *sync.Mutex, subscriptions *int, firstAck chan struct{}, loseFirst chan struct{}, secondSubscribe chan struct{}, secondSubscribeOnce *sync.Once, allowSecondAck chan struct{}, stop chan struct{}) {
+	serveRegistryTestHomeConnectionWithHeartbeat(conn, "100ms", false, subscriptionMu, subscriptions, firstAck, loseFirst, secondSubscribe, secondSubscribeOnce, allowSecondAck, stop)
+}
+
+// serveRegistryTestHomeConnectionWithHeartbeat never sends heartbeat PONGs, so a short
+// heartbeatTimeout fails every lifetime by silence. With closeOnLose the first
+// subscription instead ends when loseFirst closes, independent of the clock.
+func serveRegistryTestHomeConnectionWithHeartbeat(conn net.Conn, heartbeatTimeout string, closeOnLose bool, subscriptionMu *sync.Mutex, subscriptions *int, firstAck chan struct{}, loseFirst chan struct{}, secondSubscribe chan struct{}, secondSubscribeOnce *sync.Once, allowSecondAck chan struct{}, stop chan struct{}) {
 	defer func() { _ = conn.Close() }()
 	reader := bufio.NewReader(conn)
 	for {
@@ -2597,7 +2607,7 @@ func serveRegistryTestHomeConnection(conn net.Conn, subscriptionMu *sync.Mutex, 
 				return
 			}
 		case len(args) >= 2 && strings.EqualFold(args[0], "GET") && args[1] == "config":
-			payload := "credential-concurrency:\n  lifecycle-config-revision: 1\n  cpa-heartbeat-timeout: 100ms\n  cpa-cancel-bound: 100ms\n"
+			payload := "credential-concurrency:\n  lifecycle-config-revision: 1\n  cpa-heartbeat-timeout: " + heartbeatTimeout + "\n  cpa-cancel-bound: 100ms\n"
 			if _, errWrite := io.WriteString(conn, fmt.Sprintf("$%d\r\n%s\r\n", len(payload), payload)); errWrite != nil {
 				return
 			}
@@ -2617,6 +2627,9 @@ func serveRegistryTestHomeConnection(conn net.Conn, subscriptionMu *sync.Mutex, 
 				close(firstAck)
 				select {
 				case <-loseFirst:
+					if closeOnLose {
+						return
+					}
 					<-stop
 					return
 				case <-stop:
