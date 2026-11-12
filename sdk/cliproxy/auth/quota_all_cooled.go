@@ -116,6 +116,13 @@ func (m *Manager) allCooledNext(ctx context.Context, round *allCooledRound, prov
 		if cfg == nil || cfg.Home.Enabled || len(cfg.QuotaReconcile) == 0 {
 			return nil, nil, nil, "", false
 		}
+		// A credential this request already tried that holds no quota cooldown
+		// failed for another reason (a dropped connection, a 5xx). The pool is
+		// not all cooled: the request's own retry goes back to it, so no
+		// half-open trial is spent on the cooled ones.
+		if m.triedCredentialWithoutQuotaCooldown(providers, tried) {
+			return nil, nil, nil, "", false
+		}
 		round.started = true
 		round.finalErr = finalErr
 	}
@@ -201,6 +208,33 @@ func (m *Manager) allCooledAdapterRecheck(ctx context.Context, cfg *internalconf
 		}
 	}
 	return cleared
+}
+
+// triedCredentialWithoutQuotaCooldown reports whether tried holds an enabled
+// credential of one of providers that is not in a quota cooldown.
+func (m *Manager) triedCredentialWithoutQuotaCooldown(providers []string, tried map[string]struct{}) bool {
+	if len(tried) == 0 {
+		return false
+	}
+	providerSet := make(map[string]struct{}, len(providers))
+	for _, p := range providers {
+		if norm := canonicalSchedulingProvider(p); norm != "" && norm != "mixed" {
+			providerSet[norm] = struct{}{}
+		}
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for id := range tried {
+		auth := m.auths[id]
+		if auth == nil || auth.Disabled || authHasQuotaCooldown(auth) {
+			continue
+		}
+		if _, ok := providerSet[executorKeyFromAuth(auth)]; len(providerSet) > 0 && !ok {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // allCooledCandidates returns copies of the credentials that could serve model

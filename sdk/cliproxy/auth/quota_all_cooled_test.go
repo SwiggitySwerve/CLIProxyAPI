@@ -3,9 +3,11 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -50,6 +52,9 @@ type allCooledExecutor struct {
 	calls    map[string]int
 	// served overrides the headers of a lifted credential's 200.
 	served http.Header
+	// transient counts upcoming non-quota failures (a dropped connection) per
+	// credential; each Execute call on it consumes one.
+	transient map[string]int
 }
 
 func newAllCooledExecutor(provider string) *allCooledExecutor {
@@ -95,7 +100,21 @@ func (e *allCooledExecutor) callCount(id string) int {
 	return e.calls[id]
 }
 
+func (e *allCooledExecutor) takeTransient(id string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.transient[id] == 0 {
+		return false
+	}
+	e.transient[id]--
+	e.calls[id]++
+	return true
+}
+
 func (e *allCooledExecutor) Execute(ctx context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if e.takeTransient(auth.ID) {
+		return cliproxyexecutor.Response{}, fmt.Errorf("claude tls: handshake upstream: read: %w", syscall.ECONNRESET)
+	}
 	if e.attempt(ctx, auth.ID) {
 		return cliproxyexecutor.Response{Payload: []byte(`{"served_by":"` + auth.ID + `"}`), Headers: e.servedHeaders()}, nil
 	}
@@ -289,6 +308,32 @@ func TestAllCooledTrialClearFeedsFlapBackoff(t *testing.T) {
 	}
 	if want := st.probedAt.Add(backedOffInterval(st.baseInterval, 1)); !st.nextCheck.Equal(want) || st.baseInterval <= 0 {
 		t.Fatalf("next check = %v (base %v), want %v from a booked trial", st.nextCheck, st.baseInterval, want)
+	}
+}
+
+// A healthy credential that failed this request for a non-quota reason (the
+// 2026-11-12 08:43 case: a TLS reset) means the pool is not all cooled. No
+// half-open trial runs on the cooled credentials; the request retries on the
+// healthy one instead.
+func TestAllCooledTrialSkippedWhenTriedCredentialIsHealthy(t *testing.T) {
+	f := newAllCooledFixture(t, nil, internalconfig.QuotaReconcileClear, "claude-a", "claude-b")
+	// As on the operator's Claude instance: request-retry 2, max-retry-interval 30s.
+	f.manager.SetRetryConfig(2, 30*time.Second, 0)
+	f.cool(t, "claude-b")
+	f.executor.lift("claude-a")
+	f.executor.mu.Lock()
+	f.executor.transient = map[string]int{"claude-a": 1}
+	f.executor.mu.Unlock()
+
+	resp, err := f.execute(cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("Execute error = %v, want the retry served by claude-a", err)
+	}
+	if string(resp.Payload) != `{"served_by":"claude-a"}` {
+		t.Fatalf("payload = %s, want served by claude-a", resp.Payload)
+	}
+	if calls := f.executor.callCount("claude-b"); calls != 0 {
+		t.Fatalf("cooled claude-b was trialled %d time(s) while claude-a was healthy", calls)
 	}
 }
 
