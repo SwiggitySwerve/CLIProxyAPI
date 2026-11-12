@@ -23,6 +23,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	log "github.com/sirupsen/logrus"
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -1444,6 +1445,15 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					updateAggregatedAvailability(auth, now)
 				}
 			} else {
+				// No execution path emits a model-less failure today (see
+				// TestExecutionNeverRecordsModelLessResult). Cooldown logic for this branch is
+				// untested against live traffic, so make any occurrence visible. The formatter
+				// prints only a fixed field set, so the values live in the message text.
+				authRef := auth.Index
+				if authRef == "" {
+					authRef = auth.ID
+				}
+				log.Warnf("model-less failed result recorded: provider=%s auth=%s status=%d", result.Provider, authRef, statusCodeFromResult(result.Error))
 				disableCooling := m.cooldownDisabledForAuth(auth)
 				if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown {
 					disableCooling = false
