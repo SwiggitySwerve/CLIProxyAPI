@@ -269,21 +269,44 @@ plus three provider-keyed maps. Grouped by the decision they make:
    - `recheckCadence`: Codex's probe-every-pass default, read by
      `quotaRecheckPolicyFor` at `quota_recheck_schedule.go:61`. Providers without
      one keep the slow `claudeRecheck*` defaults (`:20-22`).
-   Tests: the `SignalAllowlist`, `SignalRetentionOrder`, `RejectedCooldownSignals` and
-   `RecheckCadence` cases in `provider_quota_characterization_test.go`.
+   Tests: the `SignalAllowlist`, `SignalRetentionOrder`, `SignalRankOrder` (the rank of
+   each header class per provider), `RejectedCooldownSignals` and `RecheckCadence` cases
+   in `provider_quota_characterization_test.go`.
 
    **Slice 2b (not done): legacy `quota-reconcile: true` = codex clear**,
    `internal/config/quota_reconcile.go:45` (parse) and `:91` (save back as `true`).
-   `internal/config` cannot import `sdk/cliproxy/auth` (auth imports config), so the
-   registry cannot answer there. The options are a config-package hook that auth's
-   `init` sets, or storing a legacy marker that auth resolves. The marker would
-   change the `QuotaReconcileConfig` value that management JSON and `MarshalYAML`
-   expose. Both cost more than the single literal they replace, so it stays in config.
-3. **429 classification and cooldown scope (slice 3).** `selector.go:666`
-   `claudeUnifiedCooldownForAuth`; `scheduler.go:1641` `claudeCooldownSummaryLocked`;
-   `conductor_cooldown.go:399,492` restore of Claude cooldown signals and `:1237,1282,1474`
-   unified-rejection capture; `conductor_cooldown.go:90` `providerCoolingOverrideForAuth`;
-   `conductor_request_scoped_errors.go:240-268` request-scoped error rules per key section.
+   The cycle: `sdk/cliproxy/auth` imports `internal/config` (`internalconfig.Config` is
+   the manager's runtime config, e.g. `api_key_model_capabilities.go:8`), so
+   `internal/config` cannot import auth and the registry cannot answer at YAML parse
+   time. No small clean break exists. The three ways out:
+   - a config-package hook (`var LegacyQuotaReconcileProviders func() []string`) that
+     auth's `init` sets: parsing then depends on whether auth is linked into the
+     binary, so config-only tests and tools would read legacy `true` as nothing;
+   - a legacy marker in `QuotaReconcileConfig` that auth resolves: it changes the value
+     management JSON and `MarshalYAML` expose, and every reader must resolve it;
+   - moving the registry's static facts into a leaf package both import: the right
+     shape for slice 4 (which must export the registry anyway), but a larger move.
+   Each costs more than the one literal it replaces, so `"codex"` stays in config
+   until slice 4 creates the exported registry package; config can then import it.
+3. **429 classification and cooldown scope (slice 3, done).** Whether a provider's
+   rejection signals pin its cooldowns, are restored on restart and are echoed on the
+   429 the hub returns is now `providerPinsCooldownSignals` (`provider_registry.go`),
+   true when the entry has a `rejects` rule (Claude only). It replaced the `"claude"`
+   literals in `selector.go` `newModelCooldownErrorWithCause` (was
+   `isClaudeCooldownProvider`) and `claudeUnifiedCooldownForAuth`, `scheduler.go`
+   `claudeCooldownSummaryLocked`, and both signal restores in `conductor_cooldown.go`
+   `restoreCooldownRecordLocked`. The unified-rejection capture already went through
+   the registry (`rejectedClaudeSignalsForCooldown`, slice 2).
+   The signal *format* stays Claude's: `hasRejectedClaudeUnifiedSignals`, the
+   unified-prefix filter in `sanitizePersistedClaudeCooldownSignals` and
+   `appendClaudeUnifiedHeaders` read and write Anthropic header names. They become
+   per-provider only when a second provider gets a `rejects` rule.
+   Reclassified from this group: `conductor_cooldown.go` `providerCoolingOverrideForAuth`
+   has no provider literal (it reads the OpenAI-compatible config);
+   `conductor_request_scoped_errors.go` maps a provider to its config key section
+   (group 7); `isTerminalRefreshError`'s Codex `invalid_grant` rule
+   (`conductor_cooldown.go`) is refresh behaviour (slice 4).
+   Tests: `CooldownSignalGates` in `provider_quota_characterization_test.go`.
 4. **Authenticator, login and refresh (slice 4).** `internal/api/handlers/management/`:
    `auth_files_v8.go:406-418` `StartOAuthV8` provider to login handler, `:435,480` Kimi
    domain, `:535` `ImportOAuthV8`; `oauth_sessions.go:647-655` `NormalizeOAuthProvider`;
@@ -317,7 +340,8 @@ plus three provider-keyed maps. Grouped by the decision they make:
    `internal/pluginhost/adapters.go:93` and `internal/auth/kimi/kimi.go:71` classify
    model families or domains.
 
-Slice order: 1, 2, 3, 4, 5, then decide on 6. Slices 1-3 stay inside
+Slice order: 1, 2, 3, 4, 5, then decide on 6. Done: 1, 2 and 3; 2b is blocked (above)
+and waits for slice 4. Remaining: 4 (with 2b), 5, then the decision on 6. Slices 1-3 stay inside
 `sdk/cliproxy/auth` and extend the same `providerQuota` entry; slice 4 is where the
 registry first needs to be exported (management handlers are another package).
 

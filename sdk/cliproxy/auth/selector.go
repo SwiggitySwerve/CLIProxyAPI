@@ -102,7 +102,7 @@ func newModelCooldownError(model, provider string, resetIn time.Duration) *model
 }
 
 func newModelCooldownErrorWithCause(model, provider string, resetIn time.Duration, cause error) *modelCooldownError {
-	return newModelCooldownErrorForCandidates(model, provider, resetIn, cause, isClaudeCooldownProvider(provider), nil)
+	return newModelCooldownErrorForCandidates(model, provider, resetIn, cause, providerPinsCooldownSignals(provider), nil)
 }
 
 func newModelCooldownErrorForCandidates(model, provider string, resetIn time.Duration, cause error, claudeCooldown bool, claudeSignals map[string]string) *modelCooldownError {
@@ -117,10 +117,6 @@ func newModelCooldownErrorForCandidates(model, provider string, resetIn time.Dur
 		claudeCooldown: claudeCooldown,
 		claudeSignals:  maps.Clone(claudeSignals),
 	}
-}
-
-func isClaudeCooldownProvider(provider string) bool {
-	return strings.EqualFold(strings.TrimSpace(provider), "claude")
 }
 
 func (e *modelCooldownError) IsModelCooldown() bool {
@@ -663,7 +659,7 @@ func claudeSignalsFromEvaluatedQuota(q QuotaState) (bool, map[string]string) {
 }
 
 func claudeUnifiedCooldownForAuth(auth *Auth, model string, now time.Time) (bool, map[string]string) {
-	if auth == nil || executorKeyFromAuth(auth) != "claude" {
+	if auth == nil || !providerPinsCooldownSignals(executorKeyFromAuth(auth)) {
 		return false, nil
 	}
 	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {

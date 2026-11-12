@@ -397,7 +397,7 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		quota.NextRecoverAt = record.NextRetryAfter
 	}
 	quota.cooldownEvaluated = quota.Exceeded
-	if executorKeyFromAuth(auth) == "claude" || strings.EqualFold(strings.TrimSpace(record.Provider), "claude") {
+	if providerPinsCooldownSignals(executorKeyFromAuth(auth)) || providerPinsCooldownSignals(record.Provider) {
 		quota.cooldownSignals = sanitizePersistedClaudeCooldownSignals(record.CooldownSignals)
 	}
 
@@ -437,7 +437,7 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		}
 		quota.cooldownEvaluated = quota.Exceeded
 		quota.cooldownSignals = nil
-		if executorKeyFromAuth(auth) == "claude" || strings.EqualFold(strings.TrimSpace(record.Provider), "claude") {
+		if providerPinsCooldownSignals(executorKeyFromAuth(auth)) || providerPinsCooldownSignals(record.Provider) {
 			quota.cooldownSignals = sanitizePersistedClaudeCooldownSignals(record.IndependentCooldownSignals)
 		}
 		record.NextRetryAfter = own.NextRetryAfter

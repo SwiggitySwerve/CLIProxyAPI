@@ -1626,7 +1626,7 @@ func (m *modelScheduler) claudeCooldownSummaryLocked(fallbackProvider, model str
 		} else {
 			entryProvider = strings.ToLower(strings.TrimSpace(fallbackProvider))
 		}
-		if entryProvider != "claude" {
+		if !providerPinsCooldownSignals(entryProvider) {
 			return false, time.Time{}, "", nil
 		}
 		checkModel := model
