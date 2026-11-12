@@ -491,6 +491,52 @@ func waitForCooldownTransition(t *testing.T, done <-chan bool, name string) bool
 	}
 }
 
+func TestManagerApplyConfigWithCooldownStatePersistsLiveCooldownsWhenStoreAttached(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "auth-1", Provider: "xai", Status: StatusActive}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register() returned error: %v", errRegister)
+	}
+	manager.MarkResult(context.Background(), Result{
+		AuthID: auth.ID, Provider: auth.Provider, Model: "grok-4", Success: false,
+		Error: &Error{Message: "rate limited", HTTPStatus: 429},
+	})
+
+	store := &recordingCooldownStateStore{}
+	if applied := manager.ApplyConfigWithCooldownStateStore(context.Background(), &internalconfig.Config{}, store); !applied {
+		t.Fatal("ApplyConfigWithCooldownStateStore() = false, want true")
+	}
+	if got := store.saveCount.Load(); got != 1 {
+		t.Fatalf("newly attached store save count = %d, want 1", got)
+	}
+	foundModelCooldown := false
+	for _, record := range store.savedRecords() {
+		if record.AuthID == auth.ID && record.Model == "grok-4" {
+			foundModelCooldown = true
+		}
+	}
+	if !foundModelCooldown {
+		t.Fatalf("newly attached store records = %+v, want the live grok-4 cooldown for %s", store.savedRecords(), auth.ID)
+	}
+
+	if applied := manager.ApplyConfigWithCooldownStateStore(context.Background(), &internalconfig.Config{}, store); !applied {
+		t.Fatal("second ApplyConfigWithCooldownStateStore() = false, want true")
+	}
+	if got := store.saveCount.Load(); got != 2 {
+		t.Fatalf("unchanged store save count = %d, want 2 (one per apply, as before)", got)
+	}
+
+	if applied := manager.ApplyConfigWithCooldownStateStore(context.Background(), &internalconfig.Config{}, nil); !applied {
+		t.Fatal("removing store: ApplyConfigWithCooldownStateStore() = false, want true")
+	}
+	if applied := manager.ApplyConfigWithCooldownStateStore(context.Background(), &internalconfig.Config{}, nil); !applied {
+		t.Fatal("nil to nil: ApplyConfigWithCooldownStateStore() = false, want true")
+	}
+	if got := store.saveCount.Load(); got != 3 {
+		t.Fatalf("store save count after removal and nil->nil = %d, want 3", got)
+	}
+}
+
 func TestManagerSwapCooldownStateStoreKeepsOldStoreWhenCanceled(t *testing.T) {
 	oldStore := &blockingCooldownStateStore{started: make(chan struct{}), release: make(chan struct{})}
 	newStore := &recordingCooldownStateStore{}

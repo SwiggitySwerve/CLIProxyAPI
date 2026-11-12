@@ -212,6 +212,11 @@ func (m *Manager) ApplyConfigWithCooldownStateStore(ctx context.Context, cfg *in
 	if oldStore != nil && !m.persistCooldownStatesToLocked(ctx, oldStore) {
 		return false
 	}
+	if oldStore == nil && store != nil {
+		// A newly attached store must receive the live cooldowns; a failed save is
+		// already logged and later cooldown changes persist as usual.
+		m.persistCooldownStatesToLocked(ctx, store)
+	}
 	if errContext := ctx.Err(); errContext != nil {
 		return false
 	}
