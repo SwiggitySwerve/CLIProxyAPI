@@ -168,17 +168,35 @@ It works bare and as the `routing.session-affinity` fallback.
 credential whose longest quota window resets soonest, so quota that is about to
 expire is spent first. Lowest rank wins; ties keep ID order:
 
-1. Not observed since start (`Quota.ObservedAt` zero), or the observed reset has
-   passed: tried first. A response without quota headers leaves the old snapshot in
-   place, so such a credential keeps this rank on every pick until a response with
+1. No current observation: tried first. That is never observed since start
+   (`Quota.ObservedAt` zero), observed longer ago than the staleness threshold, or the
+   observed reset has passed. A response without quota headers leaves the old snapshot
+   in place, so such a credential keeps this rank on every pick until a response with
    headers arrives (meanwhile the strategy keeps choosing it, like fill-first).
 2. Known future reset: soonest first.
-3. Observed but no usable reset time: last.
+3. Observed recently but no usable reset time: last.
 
-Reset time: Claude `Anthropic-Ratelimit-Unified-7d-Reset`, else
-`Anthropic-Ratelimit-Unified-Reset`. Codex: the secondary window, else the primary,
-using `X-Codex-<Window>-Reset-At`, else `X-Codex-<Window>-Reset-After-Seconds` added to
-`ObservedAt` (zero means the window just reset). Other providers have no reset time and fall back to fill-first order.
+Staleness: an observation older than `soonestResetStaleAfter` (6h) is Unknown and
+ranks in the refresh bucket, whatever its reset time or signals say, so an idle
+credential gets traffic and a new observation instead of ranking on an old snapshot.
+6h is just over the 5h Claude window: an older snapshot has outlived a whole short
+window. Observations are in memory only, so after a restart every credential is
+unobserved anyway. The check uses the same `now` the pick uses.
+
+Reset time comes from a per-provider function, the `soonestResetWindows` table keyed by
+the credential's provider. Each function names its windows and returns the reset time
+to rank on plus the window name:
+
+- Claude (`Anthropic-Ratelimit-Unified-<window>-Reset`, epoch seconds), first usable
+  of: `7d_oi` (only for Fable models), `7d`, `unified`. `5h` is named but never ranked
+  on. The `7d_oi` window is model-scoped, so it never ranks a model outside its scope;
+  the model test is `claudeModelHas7dOIWindow` (the executor tells `7d_oi` apart only
+  by response headers, so there was no existing model check to reuse). Whether the
+  Fable window really is `7d_oi` is a measure-first item in the roadmap.
+- Codex: `secondary`, else `primary`, using `X-Codex-<Window>-Reset-At`, else
+  `X-Codex-<Window>-Reset-After-Seconds` added to `ObservedAt` (zero means the window
+  just reset).
+- Other providers have no entry, so no reset time, and fall back to fill-first order.
 It only reads the quota headers the hub already stores after each response. It makes
 no extra upstream calls and keeps no state.
 Tests: `selector_soonest_reset_test.go`, `service_config_soonest_reset_test.go`,
