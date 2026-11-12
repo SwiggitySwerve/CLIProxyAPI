@@ -10,7 +10,7 @@ deploy/local/
     up.sh down.sh status.sh logs.sh
     config.template.yaml proxy config template (placeholders only)
     mock/mock_upstream.py mock Anthropic + Codex upstream (Python stdlib)
-    scenarios/           end-to-end scripts; cooldown-basic.sh is the template
+    scenarios/           end-to-end scripts; cooldown-basic.sh is the template, connect-check.sh covers cli-proxy-connect
 ```
 
 ## Staging
@@ -69,6 +69,9 @@ headers for the active scenario.
 deploy/local/staging/scenarios/cooldown-basic.sh          # ~25s
 deploy/local/staging/scenarios/cooldown-basic.sh --quick  # skips the timing part
 ```
+
+`scenarios/connect-check.sh` exercises `sidecars/connect/cli-proxy-connect` (verify, listing,
+exporter check, and the login start/poll/cancel; a completed OAuth login is not covered).
 
 A scenario sources `scenarios/common.sh` (helpers: `mock_set`, `mock_log`,
 `claude_request`, `check`, `restart_proxy`) and exits non-zero on the first failed check.

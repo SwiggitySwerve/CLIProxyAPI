@@ -1,0 +1,339 @@
+#!/usr/bin/env python3
+"""Connect an account to a proxy instance and verify it end to end.
+
+usage: cli-proxy-connect <provider> [instance] [--credential ID] [--model M]
+                         [--no-exporter | --exporter-url URL] [--timeout SECONDS]
+
+Steps (each prints ok / FAIL / skip):
+  1. oauth     GET /oauth/auth-url?provider=<provider>&verify=true, print the login URL, poll
+               /oauth/status until ok or error. If the browser ends on a page that cannot
+               reach the proxy, paste that page's full URL here (or pipe it on stdin); it is
+               submitted to POST /oauth/callback. Skipped with --credential.
+  2. verify    POST /credentials/verify: one account-pinned, 1-token inference.
+  3. listing   print id, auth_index, models, quota windows with observed_at and the
+               cooldown state from GET /credentials.
+  4. exporter  one GET /metrics must list the credential (cliproxy_credential_state with
+               its instance and auth_index). Skipped with --no-exporter.
+
+Safe by default: the only writes are the OAuth login itself and the 1-token verify
+inference. It never edits config, priorities, exclusions or auth files; the proxy writes
+the new auth file itself when the login completes. Exit status 0 only if every step that
+ran passed (2 for usage errors).
+
+--credential ID checks a credential that already exists (id, name or auth_index from the
+listing) and skips the login. Instances come from the shared instance map
+(deploy/local/instances.example.json); the management key is read from the file the other
+sidecars use. Environment overrides: CLI_PROXY_INSTANCES, CLI_PROXY_MANAGEMENT_KEY_FILE,
+CLI_PROXY_EXPORTER_CONFIG, CLI_PROXY_EXPORTER_LISTEN.
+"""
+import argparse
+import json
+import os
+import re
+import select
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+BUILTIN_INSTANCES = [
+    {"id": "claude-primary", "provider": "claude", "base_url": "http://127.0.0.1:8319", "management_path": "/v8/management"},
+    {"id": "codex-primary", "provider": "codex", "base_url": "http://127.0.0.1:8317", "management_path": "/v8/management"},
+]
+POLL_SECONDS = 2
+# Quota signals as the proxy records them (same patterns as cli-proxy-exporter).
+CLAUDE_SIGNAL = re.compile(r"^anthropic-ratelimit-unified-(?:(\w+)-)?(utilization|reset|status)$", re.I)
+CODEX_SIGNAL = re.compile(r"^x-codex-(primary|secondary)-(used-percent|reset-at)$", re.I)
+
+
+class Failed(Exception):
+    pass
+
+
+def instances_file():
+    return Path(os.environ.get("CLI_PROXY_INSTANCES") or Path.home() / ".config/cli-proxy/instances.json")
+
+
+def key_file():
+    return Path(os.environ.get("CLI_PROXY_MANAGEMENT_KEY_FILE") or Path.home() / ".config/cli-proxy-rerank/management-key")
+
+
+def load_instances():
+    try:
+        return json.loads(instances_file().read_text())["instances"]
+    except FileNotFoundError:
+        return BUILTIN_INSTANCES
+
+
+def pick_instance(instances, provider, wanted):
+    if wanted:
+        for i in instances:
+            if i["id"] == wanted:
+                if i["provider"] != provider:
+                    print(f"note: instance {wanted} is mapped to provider {i['provider']}, not {provider}", file=sys.stderr)
+                return i
+        raise Failed(f"unknown instance '{wanted}' (known: {', '.join(i['id'] for i in instances)})")
+    matches = [i for i in instances if i["provider"] == provider]
+    if len(matches) != 1:
+        known = ", ".join(f"{i['id']} ({i['provider']})" for i in instances)
+        raise Failed(f"{len(matches)} instances serve provider '{provider}'; name one of: {known}")
+    return matches[0]
+
+
+def exporter_url(override):
+    """Metrics URL: --exporter-url, else the exporter's own listen config (same sources and
+    default as cli-proxy-exporter), preferring a loopback address."""
+    if override:
+        return override
+    spec = os.environ.get("CLI_PROXY_EXPORTER_LISTEN")
+    if spec:
+        listen = [(h, int(p)) for h, _, p in (s.strip().rpartition(":") for s in spec.split(","))]
+    else:
+        path = Path(os.environ.get("CLI_PROXY_EXPORTER_CONFIG") or Path.home() / ".config/cli-proxy/exporter.json")
+        try:
+            listen = [(h, int(p)) for h, p in json.loads(path.read_text())["listen"]]
+        except FileNotFoundError:
+            listen = [("127.0.0.1", 9787)]
+    host, port = next((a for a in listen if a[0].startswith("127.")), listen[0])
+    return f"http://{'127.0.0.1' if host in ('', '0.0.0.0') else host}:{port}/metrics"
+
+
+class Proxy:
+    def __init__(self, instance, key):
+        self.base = instance["base_url"].rstrip("/") + instance.get("management_path", "/v8/management")
+        self.key = key
+
+    def call(self, method, path, query=None, body=None, timeout=30):
+        url = self.base + path + ("?" + urllib.parse.urlencode(query) if query else "")
+        req = urllib.request.Request(
+            url, method=method, data=json.dumps(body).encode() if body is not None else None,
+            headers={"Authorization": f"Bearer {self.key}", "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.status, json.load(resp)
+        except urllib.error.HTTPError as e:  # keep the body: it carries the proxy's error text
+            try:
+                return e.code, json.load(e)
+            except ValueError:
+                return e.code, {"error": e.reason}
+
+
+def step(name, state, detail=""):
+    print(f"[{state:>4}] {name}{': ' + detail if detail else ''}", flush=True)
+
+
+def stdin_line():
+    """A pasted line if one is waiting, "" if none yet, None once stdin is exhausted."""
+    if select.select([sys.stdin], [], [], 0)[0]:
+        line = sys.stdin.readline()
+        return line.strip() if line else None
+    return ""
+
+
+def login(proxy, provider, timeout):
+    status, resp = proxy.call("GET", "/oauth/auth-url", {"provider": provider, "verify": "true"})
+    if status != 200 or not resp.get("url") or not resp.get("state"):
+        raise Failed(f"auth-url returned HTTP {status}: {resp.get('error') or resp}")
+    state = resp["state"]
+    print(f"\nOpen this URL and sign in:\n\n  {resp['url']}\n")
+    print("If the browser ends on a page that cannot reach the proxy, paste that page's full URL here.\n", flush=True)
+    deadline = time.time() + timeout
+    reading = True
+    try:
+        while time.time() < deadline:
+            line = stdin_line() if reading else ""
+            if line is None:
+                reading = False
+            elif line:
+                code, reply = proxy.call("POST", "/oauth/callback", body={"provider": provider, "redirect_url": line})
+                if code >= 400:
+                    raise Failed(f"callback rejected (HTTP {code}): {reply.get('error') or reply}")
+            code, st = proxy.call("GET", "/oauth/status", {"state": state})
+            if st.get("status") == "ok":
+                if not st.get("auth_id"):
+                    raise Failed("login finished but the proxy reported no credential id; rerun with --credential")
+                if st.get("verification_error"):
+                    print(f"note: the proxy's own post-login verification reported: {st['verification_error']}")
+                return st["auth_id"]
+            if st.get("status") == "error" or code >= 400:
+                raise Failed(f"login failed: {st.get('error') or st}")
+            time.sleep(POLL_SECONDS)
+        raise Failed(f"no login completed within {timeout}s")
+    except (Failed, KeyboardInterrupt):
+        proxy.call("DELETE", "/oauth/session", {"state": state})  # do not leave a pending login behind
+        raise
+
+
+def find_credential(proxy, ident):
+    status, data = proxy.call("GET", "/credentials")
+    if status != 200:
+        raise Failed(f"credential listing returned HTTP {status}: {data.get('error') or data}")
+    for f in data.get("files") or []:
+        if ident in (f.get("id"), f.get("name"), f.get("auth_index")):
+            return f
+    raise Failed(f"credential '{ident}' is not in the listing")
+
+
+def clock(epoch):
+    return datetime.fromtimestamp(float(epoch), timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+
+
+def windows(signals):
+    """Named quota windows from recorded rate-limit headers: {window: {used, status, reset}}."""
+    out = {}
+    for key, raw in (signals or {}).items():
+        cm, xm = CLAUDE_SIGNAL.match(key), CODEX_SIGNAL.match(key)
+        if cm:
+            window, kind = (cm.group(1) or "unified").lower(), cm.group(2).lower()
+        elif xm:
+            window, kind = xm.group(1).lower(), xm.group(2).lower()
+        else:
+            continue
+        w = out.setdefault(window, {})
+        try:
+            num = float(raw)
+        except (TypeError, ValueError):
+            num = None
+        if kind == "utilization" and num is not None:
+            w["used"] = f"{num * 100:.0f}%"
+        elif kind == "used-percent" and num is not None:
+            w["used"] = f"{num:.0f}%"
+        elif kind in ("reset", "reset-at") and num is not None:
+            w["reset"] = clock(num)
+        elif kind == "status":
+            w["status"] = raw
+    return {k: v for k, v in out.items() if v}
+
+
+def print_quota(label, quota):
+    quota = quota or {}
+    wins = windows(quota.get("signals"))
+    if not wins:
+        print(f"  {label}: no quota signals observed yet")
+        return
+    print(f"  {label}: observed_at {quota.get('observed_at') or 'unknown'}")
+    for name, w in sorted(wins.items()):
+        print(f"    {name}: " + ", ".join(f"{k} {v}" for k, v in w.items()))
+
+
+def show_listing(proxy, cid):
+    entry = find_credential(proxy, cid)
+    print(f"\n  id          {entry['id']}")
+    print(f"  auth_index  {entry.get('auth_index')}")
+    print(f"  provider    {entry.get('provider')}   kind {entry.get('kind')}   instance_id {entry.get('instance_id') or 'unset'}")
+    if entry.get("email"):
+        print(f"  account     {entry['email']}")
+    print(f"  priority    {entry.get('priority', 'unset')}")
+    status, models = proxy.call("GET", "/credentials/models", {"name": entry["id"]})
+    ids = [m["id"] for m in models.get("models") or []] if status == 200 else []
+    print(f"  models      {', '.join(ids) if ids else 'none listed'}")
+    print_quota("quota", entry.get("quota"))
+    base = windows((entry.get("quota") or {}).get("signals"))
+    for model, q in sorted((entry.get("model_quotas") or {}).items()):
+        if windows((q or {}).get("signals")) != base:  # only per-model windows that differ (e.g. 7d_oi)
+            print_quota(f"quota[{model}]", q)
+    cooldowns = entry.get("cooldowns") or []
+    print(f"  state       status {entry.get('status')}, unavailable {entry.get('unavailable')}, "
+          f"quota_blocked {entry.get('quota_blocked')}, recovery_stage {entry.get('recovery_stage')}")
+    print(f"  next_retry  {entry.get('next_retry_after') or 'none'}")
+    for c in cooldowns:
+        print(f"  cooldown    scope {c.get('scope')}, model {c.get('model_key') or 'all'}, reason {c.get('reason')}, "
+              f"retry_at {c.get('retry_at')}, remaining {c.get('remaining_seconds')}s")
+    if not cooldowns:
+        print("  cooldown    none")
+    print()
+    return entry
+
+
+def exporter_lists(url, instance_id, auth_index):
+    """One scrape: the cliproxy_credential_state series for this credential, or None."""
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        text = resp.read().decode()
+    for line in text.splitlines():
+        if (line.startswith("cliproxy_credential_state{") and f'instance="{instance_id}"' in line
+                and f'auth_index="{auth_index}"' in line):
+            return line
+    return None
+
+
+def run(args):
+    key = key_file().read_text().strip()
+    instance = pick_instance(load_instances(), args.provider, args.instance)
+    proxy = Proxy(instance, key)
+    print(f"instance {instance['id']} ({proxy.base})")
+    failures = []
+
+    def attempt(name, fn):
+        try:
+            result = fn()
+            step(name, "ok")
+            return result
+        except Failed as e:
+            step(name, "FAIL", str(e))
+        except (urllib.error.URLError, OSError) as e:
+            step(name, "FAIL", f"{type(e).__name__}: {e}")
+        failures.append(name)
+
+    if args.credential:
+        step("oauth", "skip", "--credential given")
+        cid = find_credential(proxy, args.credential)["id"]
+    else:
+        cid = attempt("oauth", lambda: login(proxy, args.provider, args.timeout))
+        if not cid:
+            return 1
+
+    def verify():
+        body = {"name": cid, **({"model": args.model} if args.model else {})}
+        status, resp = proxy.call("POST", "/credentials/verify", body=body, timeout=120)
+        if status != 200 or not resp.get("verified"):
+            raise Failed(f"HTTP {status}: {resp.get('error') or resp}")
+        return True
+    attempt("verify", verify)
+
+    entry = attempt("listing", lambda: show_listing(proxy, cid))
+
+    if args.no_exporter:
+        step("exporter", "skip", "--no-exporter")
+    elif entry:
+        url = exporter_url(args.exporter_url)
+
+        def check_exporter():
+            line = exporter_lists(url, instance["id"], entry.get("auth_index"))
+            if not line:
+                raise Failed(f"{url} does not list instance={instance['id']} auth_index={entry.get('auth_index')} "
+                             "(use --no-exporter if none is configured)")
+            print(f"  {line}")
+            return True
+        attempt("exporter", check_exporter)
+    else:
+        step("exporter", "skip", "no listing entry to look for")
+    return 1 if failures else 0
+
+
+def main(argv):
+    p = argparse.ArgumentParser(prog="cli-proxy-connect", description="Connect an account to a proxy instance and verify it.")
+    p.add_argument("provider")
+    p.add_argument("instance", nargs="?")
+    p.add_argument("--credential", help="check an existing credential (id, name or auth_index) instead of logging in")
+    p.add_argument("--model", help="model for the verify inference (the proxy picks one by default)")
+    p.add_argument("--timeout", type=int, default=330, help="seconds to wait for the login (default 330; the proxy gives up after 300)")
+    p.add_argument("--no-exporter", action="store_true", help="skip the exporter check")
+    p.add_argument("--exporter-url", help="metrics URL (default: from the exporter config)")
+    try:
+        return run(p.parse_args(argv))
+    except Failed as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\ninterrupted", file=sys.stderr)
+        return 130
+    except OSError as e:
+        print(f"error: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
