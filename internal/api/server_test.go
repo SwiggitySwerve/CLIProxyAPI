@@ -3941,7 +3941,16 @@ func TestServerResponsesWebsocketReauthorizesEachTurn(t *testing.T) {
 		registry.GetGlobalRegistry().UnregisterClient(authEntry.ID)
 	})
 
-	httpServer := httptest.NewServer(server.engine)
+	// httptest.Server.Close does not wait for hijacked (websocket) connections, so the
+	// handler and its request-logging middleware can still be writing and removing the
+	// request body temp file when TempDir cleanup runs. Track in-flight handlers and wait.
+	var inflight sync.WaitGroup
+	defer inflight.Wait()
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		inflight.Add(1)
+		defer inflight.Done()
+		server.engine.ServeHTTP(w, r)
+	}))
 	defer httpServer.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/v1/responses"
