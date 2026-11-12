@@ -133,8 +133,8 @@ func TestCodexDuplexLaterCredentialFailure(t *testing.T) {
 					// A credential-scoped 429 is recorded on the credential only; other
 					// failures are recorded on the model that reported them.
 					if status == 429 {
-						if !current.Unavailable || !current.Quota.Exceeded {
-							t.Errorf("account failure not recorded on the credential: unavailable=%v quota=%+v", current.Unavailable, current.Quota)
+						if !current.Unavailable || !current.Quota.Exceeded || current.LastError == nil || current.LastError.HTTPStatus != status {
+							t.Errorf("account failure not recorded on the credential: unavailable=%v quota=%+v lastError=%+v", current.Unavailable, current.Quota, current.LastError)
 						}
 					} else if state := current.ModelStates[model]; state == nil || state.LastError == nil || state.LastError.HTTPStatus != status || !state.Unavailable {
 						t.Errorf("account failure not recorded: %+v", state)
