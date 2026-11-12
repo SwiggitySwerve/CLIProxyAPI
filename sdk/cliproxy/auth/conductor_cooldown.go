@@ -404,7 +404,9 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 	if model == "" {
 		auth.Unavailable = true
 		auth.Status = StatusError
-		auth.NextRetryAfter = record.NextRetryAfter
+		if record.NextRetryAfter.After(auth.NextRetryAfter) {
+			auth.NextRetryAfter = record.NextRetryAfter
+		}
 		if len(quota.cooldownSignals) == 0 && auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now) && !quota.NextRecoverAt.After(auth.Quota.NextRecoverAt) {
 			quota.cooldownSignals = auth.Quota.cooldownSignals
 		}
@@ -1353,7 +1355,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									auth.Quota.BackoffLevel = backoffLevel
 									auth.Quota.cooldownSignals = maps.Clone(credCooldownSignals)
 									auth.Quota.cooldownEvaluated = true
-									auth.NextRetryAfter = authNext
+									if authNext.After(auth.NextRetryAfter) {
+										auth.NextRetryAfter = authNext
+									}
 									if authNext.After(state.Quota.NextRecoverAt) || (prevAuthCredActive && result.RetryAfter == nil) {
 										state.Quota.NextRecoverAt = authNext
 										state.Quota.cooldownSignals = maps.Clone(credCooldownSignals)

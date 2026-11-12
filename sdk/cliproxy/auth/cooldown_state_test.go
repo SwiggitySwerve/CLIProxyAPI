@@ -629,6 +629,34 @@ func TestManager_RestoreCooldownStates(t *testing.T) {
 	}
 }
 
+func TestManager_RestoreCooldownStatesKeepsLongerLiveAuthDeadline(t *testing.T) {
+	now := time.Now()
+	live := now.Add(2 * time.Hour)
+	manager := NewManager(nil, nil, nil)
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), &Auth{ID: "auth-1", Provider: "xai"}); errRegister != nil {
+		t.Fatalf("Register() returned error: %v", errRegister)
+	}
+	manager.mu.Lock()
+	manager.auths["auth-1"].Unavailable = true
+	manager.auths["auth-1"].NextRetryAfter = live
+	restored := manager.restoreCooldownRecordLocked(CooldownStateRecord{
+		Provider:       "xai",
+		AuthID:         "auth-1",
+		NextRetryAfter: now.Add(time.Hour),
+		Reason:         "quota",
+		UpdatedAt:      now,
+	}, now)
+	manager.mu.Unlock()
+	if !restored {
+		t.Fatal("record was not restored")
+	}
+
+	auth, _ := manager.GetByID("auth-1")
+	if !auth.NextRetryAfter.Equal(live) {
+		t.Fatalf("auth.NextRetryAfter = %v, want live deadline %v kept", auth.NextRetryAfter, live)
+	}
+}
+
 func TestManager_RestoreCooldownStatesCanonicalizesThinkingSuffixes(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	laterRetry := now.Add(2 * time.Hour)
