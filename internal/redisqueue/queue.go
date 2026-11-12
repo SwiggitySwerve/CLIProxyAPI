@@ -21,10 +21,14 @@ type queueItem struct {
 	payload    []byte
 }
 
+type itemBuffer struct {
+	items []queueItem
+	head  int
+}
+
 type queue struct {
+	itemBuffer
 	mu               sync.Mutex
-	items            []queueItem
-	head             int
 	subscribers      map[uint64]chan []byte
 	nextSubscriberID uint64
 }
@@ -223,7 +227,7 @@ func (q *queue) popOldest(count int) [][]byte {
 	return out
 }
 
-func (q *queue) pruneLocked(now time.Time) {
+func (q *itemBuffer) pruneLocked(now time.Time) {
 	if q.head >= len(q.items) {
 		q.items = nil
 		q.head = 0
@@ -240,7 +244,7 @@ func (q *queue) pruneLocked(now time.Time) {
 	}
 }
 
-func (q *queue) maybeCompactLocked() {
+func (q *itemBuffer) maybeCompactLocked() {
 	if q.head == 0 {
 		return
 	}
