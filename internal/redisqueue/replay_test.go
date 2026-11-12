@@ -43,6 +43,36 @@ func TestUsagePayloadShapes(t *testing.T) {
 	}
 }
 
+func TestUsageObjectDeliveryOwnsPayload(t *testing.T) {
+	for _, subscribe := range []bool{false, true} {
+		withEnabledQueue(t, func() {
+			var subscriber <-chan []byte
+			if subscribe {
+				var unsubscribe func()
+				subscriber, unsubscribe = SubscribeUsage()
+				defer unsubscribe()
+				requireUsageSubscriberPayload(t, subscriber, usageSupportRefreshPayload)
+			}
+			start := ReadAfter(0, 1).NextSeq
+			payload := []byte(`{"id":"original"}`)
+			Enqueue(payload)
+			want := ReadAfter(start, 1).Records[0].Payload
+			for i := range payload {
+				payload[i] = 'x'
+			}
+			var delivered []byte
+			if subscribe {
+				delivered = <-subscriber
+			} else {
+				delivered = PopOldest(1)[0]
+			}
+			if !bytes.Equal(delivered, want) || !bytes.Equal(ReadAfter(start, 1).Records[0].Payload, want) {
+				t.Fatalf("caller mutation changed delivery (subscribe=%v)", subscribe)
+			}
+		})
+	}
+}
+
 func TestUsageSequenceConcurrentEnqueue(t *testing.T) {
 	withEnabledQueue(t, func() {
 		var fresh queue

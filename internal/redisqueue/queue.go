@@ -16,8 +16,8 @@ const (
 	usageSubscriberBuffer         = 256
 	errorSubscriberBuffer         = 256
 
-	maxReplayRecords = 16_384
-	maxReplayBytes   = 16 << 20 // Bound retained payloads independently of record size/rate.
+	maxReplayRecords = 65_536
+	maxReplayBytes   = 64 << 20 // Bound retained payloads independently of record size/rate.
 
 	usageSupportRefreshPayload = `{"support_refresh":true}`
 	usageRefreshPayload        = `{"refresh":true}`
@@ -148,19 +148,16 @@ func (q *queue) enqueue(payload []byte) {
 	}
 	now := q.now()
 	sequence := q.nextSequence + 1
+	payload = append([]byte(nil), payload...)
 	if ojson.ValidBytes(payload) && ojson.ParseBytes(payload).IsObject() {
 		doc := ojson.NewDoc(payload)
 		if err := doc.Set("queue_seq", sequence); err != nil {
 			log.Errorf("usage queue sequence: %v", err)
-			return
-		}
-		if err := doc.Set("boot_id", bootID); err != nil {
+		} else if err := doc.Set("boot_id", bootID); err != nil {
 			log.Errorf("usage queue boot id: %v", err)
-			return
+		} else {
+			payload = doc.Bytes()
 		}
-		payload = doc.Bytes()
-	} else {
-		payload = append([]byte(nil), payload...)
 	}
 	q.nextSequence = sequence
 	item := queueItem{enqueuedAt: now, payload: payload, sequence: sequence}

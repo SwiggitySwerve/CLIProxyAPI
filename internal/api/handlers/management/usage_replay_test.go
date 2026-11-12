@@ -57,7 +57,7 @@ func TestUsageReplayHTTPEnvelopeAndLateCursor(t *testing.T) {
 func TestUsageReplayHTTPRejectsMalformedCursorWithoutPopping(t *testing.T) {
 	withManagementUsageQueue(t, func() {
 		redisqueue.Enqueue([]byte("unchanged"))
-		for _, value := range []string{"", "abc", "-1", "1.5", "18446744073709551616", "%20"} {
+		for _, value := range []string{"", "abc", "-1", "1.5", "18446744073709551616", "%20", "%ZZ"} {
 			if rec := readUsageV8("after_seq=" + value); rec.Code != http.StatusBadRequest {
 				t.Fatalf("after_seq=%q: status=%d", value, rec.Code)
 			}

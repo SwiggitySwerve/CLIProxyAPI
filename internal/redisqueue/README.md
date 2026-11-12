@@ -14,8 +14,9 @@ no subscriber exists, including the existing overflow behavior.
 Replay retains records independently of subscribers and pops. Retention uses
 `redis-usage-queue-retention-seconds` (default 60, maximum 3600), pruned on enqueue
 and read. The oldest records are also evicted when retained payloads exceed
-16 MiB or the log exceeds 16,384 records. The byte cap bounds large records;
-the record cap bounds metadata overhead for small records. A payload larger
+64 MiB or the log exceeds 65,536 records. The byte cap is sized at roughly three
+times the busiest observed hour of measured production traffic; the record cap
+bounds metadata overhead for small records. A payload larger
 than the byte cap still reaches the legacy delivery path but is immediately
 evicted from replay. Disabling usage clears both buffers.
 

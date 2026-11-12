@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -45,7 +46,12 @@ func (h *Handler) GetUsageQueue(c *gin.Context) {
 // GetUsageQueueV8 supports non-destructive after_seq reads. Replay count defaults
 // to 1 and is clamped to 1000; the existing pop path keeps its count behavior.
 func (h *Handler) GetUsageQueueV8(c *gin.Context) {
-	values, replay := c.Request.URL.Query()["after_seq"]
+	query, errQuery := url.ParseQuery(c.Request.URL.RawQuery)
+	if errQuery != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid query encoding"})
+		return
+	}
+	values, replay := query["after_seq"]
 	if !replay {
 		h.GetUsageQueue(c)
 		return
