@@ -377,28 +377,37 @@ func TestProviderQuotaCharacterizationCooldownSignalGates(t *testing.T) {
 	}
 
 	// Restore keeps persisted signals when either the credential or the record
-	// is Claude.
+	// is Claude: on the credential, on a model, and on a model's own state saved
+	// beside a propagated credential quota ("independent").
 	for _, tc := range []struct {
 		auth, record string
 		want         bool
 	}{
 		{"claude", "", true}, {"codex", " Claude ", true}, {"codex", "codex", false}, {"gemini", "", false},
 	} {
-		for _, model := range []string{"", "m"} {
+		for _, variant := range []string{"", "m", "independent"} {
 			manager := NewManager(nil, nil, nil)
 			auth := &Auth{ID: "a", Provider: tc.auth}
 			manager.auths["a"] = auth
+			model := variant
 			record := CooldownStateRecord{Provider: tc.record, AuthID: "a", Model: model, NextRetryAfter: until,
 				Quota: cooldownFieldsOf(QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: until}), CooldownSignals: rejected}
+			if variant == "independent" {
+				model = "m"
+				record.Model = model
+				record.CooldownSignals = nil
+				record.IndependentState = &ModelState{NextRetryAfter: until, Quota: QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: until}}
+				record.IndependentCooldownSignals = rejected
+			}
 			if !manager.restoreCooldownRecordLocked(record, now) {
-				t.Fatalf("restore %s/%q model %q: not restored", tc.auth, tc.record, model)
+				t.Fatalf("restore %s/%q %q: not restored", tc.auth, tc.record, variant)
 			}
 			quota := auth.Quota
 			if model != "" {
 				quota = auth.ModelStates[model].Quota
 			}
 			if got := len(quota.cooldownSignals) > 0; got != tc.want {
-				t.Fatalf("restore %s/%q model %q kept signals = %v, want %v", tc.auth, tc.record, model, got, tc.want)
+				t.Fatalf("restore %s/%q %q kept signals = %v, want %v", tc.auth, tc.record, variant, got, tc.want)
 			}
 		}
 	}
