@@ -15,6 +15,7 @@ import (
 //     credential as cooling (blocked with reason cooldown).
 //   - credBlocked: the scheduler's credential-level transition check
 //     (isCredentialBlocked) that decides whether every model shard is resynced.
+//     It must never claim blocked while selection can pick the model.
 //   - listed: the /v1/models projection keeps the model visible (not Suspended).
 type availabilityAnswers struct {
 	pick        bool
@@ -23,15 +24,12 @@ type availabilityAnswers struct {
 	listed      bool
 }
 
+// The credential supports charModel (M, the requested model) and charOther (N).
 const (
 	charModel    = "char-model-m"
 	charOther    = "char-model-n"
 	charProvider = "char-provider"
 )
-
-// charSupportedModels is the registered model count the scheduler passes to
-// isCredentialBlocked for these rows (charModel and charOther).
-const charSupportedModels = 2
 
 func availabilityAnswersFor(t *testing.T, m *Manager, auth *Auth, now time.Time) availabilityAnswers {
 	t.Helper()
@@ -40,7 +38,7 @@ func availabilityAnswersFor(t *testing.T, m *Manager, auth *Auth, now time.Time)
 	return availabilityAnswers{
 		pick:        !blocked,
 		cooled:      blocked && reason == blockReasonCooldown,
-		credBlocked: isCredentialBlocked(auth, charSupportedModels, now),
+		credBlocked: isCredentialBlocked(auth, now),
 		listed:      !projection.Suspended,
 	}
 }
@@ -79,10 +77,14 @@ func charAuth(mutate func(*Auth)) *Auth {
 	return auth
 }
 
+// availabilityCharacterizationRow is one auth state. changed names why the
+// shared predicate deliberately changed a cell; every changed cell was
+// credBlocked: true before the scheduler read the shared predicate.
 type availabilityCharacterizationRow struct {
-	name string
-	auth func(now time.Time) *Auth
-	want availabilityAnswers
+	name    string
+	auth    func(now time.Time) *Auth
+	want    availabilityAnswers
+	changed string
 }
 
 func availabilityCharacterizationRows() []availabilityCharacterizationRow {
@@ -135,7 +137,8 @@ func availabilityCharacterizationRows() []availabilityCharacterizationRow {
 					a.NextRetryAfter = now.Add(-time.Minute)
 				})
 			},
-			want: availabilityAnswers{pick: true, cooled: false, credBlocked: true, listed: true},
+			want:    availabilityAnswers{pick: true, cooled: false, credBlocked: false, listed: true},
+			changed: "expired cooldown",
 		},
 		{
 			name: "auth Unavailable, live NextRetryAfter, healthy states for M and N",
@@ -147,7 +150,8 @@ func availabilityCharacterizationRows() []availabilityCharacterizationRow {
 					a.ModelStates = map[string]*ModelState{charModel: charHealthyState(now), charOther: charHealthyState(now)}
 				})
 			},
-			want: availabilityAnswers{pick: true, cooled: false, credBlocked: true, listed: true},
+			want:    availabilityAnswers{pick: true, cooled: false, credBlocked: false, listed: true},
+			changed: "aggregate of model states",
 		},
 		{
 			name: "auth Unavailable, live NextRetryAfter, healthy state for M only (states < supported)",
@@ -170,7 +174,8 @@ func availabilityCharacterizationRows() []availabilityCharacterizationRow {
 					a.ModelStates = map[string]*ModelState{charModel: charHealthyState(now), charOther: charHealthyState(now)}
 				})
 			},
-			want: availabilityAnswers{pick: true, cooled: false, credBlocked: true, listed: true},
+			want:    availabilityAnswers{pick: true, cooled: false, credBlocked: false, listed: true},
+			changed: "aggregate of model states",
 		},
 		{
 			name: "credential_quota live, no model states",
@@ -210,7 +215,8 @@ func availabilityCharacterizationRows() []availabilityCharacterizationRow {
 					a.Quota = QuotaState{Exceeded: true, Reason: "credential_quota", NextRecoverAt: until}
 				})
 			},
-			want: availabilityAnswers{pick: true, cooled: false, credBlocked: true, listed: true},
+			want:    availabilityAnswers{pick: true, cooled: false, credBlocked: false, listed: true},
+			changed: "expired cooldown",
 		},
 		{
 			name: "credential_quota expired, propagated to M and N",
@@ -224,7 +230,8 @@ func availabilityCharacterizationRows() []availabilityCharacterizationRow {
 					a.ModelStates = map[string]*ModelState{charModel: charCredentialQuotaState(now, until), charOther: charCredentialQuotaState(now, until)}
 				})
 			},
-			want: availabilityAnswers{pick: true, cooled: false, credBlocked: true, listed: true},
+			want:    availabilityAnswers{pick: true, cooled: false, credBlocked: false, listed: true},
+			changed: "expired cooldown",
 		},
 		{
 			name: "model cooldown on M, N healthy",
@@ -276,7 +283,8 @@ func availabilityCharacterizationRows() []availabilityCharacterizationRow {
 					a.ModelStates = map[string]*ModelState{charModel: charModelQuotaState(now, until), charOther: charModelQuotaState(now, until)}
 				})
 			},
-			want: availabilityAnswers{pick: false, cooled: true, credBlocked: true, listed: false},
+			want:    availabilityAnswers{pick: false, cooled: true, credBlocked: false, listed: false},
+			changed: "aggregate of model states",
 		},
 		{
 			name: "model cooldown expired on M and N (aggregate Unavailable not yet recomputed)",
@@ -290,7 +298,8 @@ func availabilityCharacterizationRows() []availabilityCharacterizationRow {
 					a.ModelStates = map[string]*ModelState{charModel: charModelQuotaState(now, until), charOther: charModelQuotaState(now, until)}
 				})
 			},
-			want: availabilityAnswers{pick: true, cooled: false, credBlocked: true, listed: true},
+			want:    availabilityAnswers{pick: true, cooled: false, credBlocked: false, listed: true},
+			changed: "expired cooldown",
 		},
 		{
 			name: "model disabled on M",
@@ -341,8 +350,8 @@ func availabilityCharacterizationRows() []availabilityCharacterizationRow {
 }
 
 // TestAvailabilityPredicateCharacterization pins what each availability
-// consumer answers for the same auth state. Rows where the consumers disagree
-// are reported by TestAvailabilityPredicateDisagreements.
+// consumer answers for the same auth state. Agreement between consumers is
+// checked by TestAvailabilityPredicateDisagreements.
 func TestAvailabilityPredicateCharacterization(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	now := time.Now()
@@ -356,10 +365,17 @@ func TestAvailabilityPredicateCharacterization(t *testing.T) {
 	}
 }
 
-// TestAvailabilityPredicateDisagreements logs every row where selection, the
-// scheduler's credential-level check and the /v1/models listing disagree.
-// cooled implies !pick by construction (both read isAuthBlockedForModel), so
-// that invariant is asserted rather than logged.
+// availabilityListingDivergences are the rows where the /v1/models projection
+// still disagrees with selection. The projection is recomputed on results and
+// refreshes, while token expiry is time-driven with no deadline to project, so
+// it does not read the shared predicate yet.
+var availabilityListingDivergences = map[string]bool{
+	"rejected access token awaiting refresh": true,
+}
+
+// TestAvailabilityPredicateDisagreements asserts that selection, the all-cooled
+// warning and the scheduler's credential-level check agree on every row, and
+// that /v1/models agrees except for the documented divergences.
 func TestAvailabilityPredicateDisagreements(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	now := time.Now()
@@ -371,10 +387,10 @@ func TestAvailabilityPredicateDisagreements(t *testing.T) {
 		// credBlocked is credential-wide: it may only claim blocked when the
 		// requested model is unpickable too.
 		if got.credBlocked && got.pick {
-			t.Logf("DISAGREE %s: scheduler credential check blocked, selection picks", row.name)
+			t.Errorf("%s: scheduler credential check blocked, selection picks", row.name)
 		}
-		if got.pick != got.listed {
-			t.Logf("DISAGREE %s: selection pick=%v, /v1/models listed=%v", row.name, got.pick, got.listed)
+		if got.pick != got.listed && !availabilityListingDivergences[row.name] {
+			t.Errorf("%s: selection pick=%v, /v1/models listed=%v", row.name, got.pick, got.listed)
 		}
 	}
 }

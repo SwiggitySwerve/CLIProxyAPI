@@ -947,30 +947,19 @@ func (s *authScheduler) upsertAuthLifecycleLocked(auth *Auth, now time.Time) {
 	providerState.upsertAuthForModelsLocked(meta, nil, true, now)
 }
 
-// isCredentialBlocked reports whether an auth is blocked at the credential level (affecting all models).
-func isCredentialBlocked(auth *Auth, supportedModelCount int, now time.Time) bool {
-	if auth == nil {
-		return true
+// isCredentialBlocked reports whether auth is blocked for a model that has no
+// state of its own, through the same predicate the model shards use. A change
+// in this answer can move every shard, so the caller resyncs them all; a model
+// state only moves the shards its result targets. With model states present,
+// auth.Unavailable is their aggregate, which each shard already reads from its
+// own state, so only the credential-wide gates count.
+func isCredentialBlocked(auth *Auth, now time.Time) bool {
+	if auth != nil && len(auth.ModelStates) > 0 {
+		blocked, _, _ := credentialAvailabilityBlock(nil, auth, "", now)
+		return blocked
 	}
-	if auth.Disabled || auth.Status == StatusDisabled {
-		return true
-	}
-	if hasUnauthorizedAuthFailure(auth) {
-		return true
-	}
-	if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && !exp.After(now) {
-		return true
-	}
-	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
-		return true
-	}
-	if len(auth.ModelStates) == 0 {
-		return auth.Unavailable || auth.Quota.Exceeded || (!auth.NextRetryAfter.IsZero() && auth.NextRetryAfter.After(now))
-	}
-	if supportedModelCount > 0 && len(auth.ModelStates) < supportedModelCount {
-		return false
-	}
-	return auth.Unavailable
+	blocked, _, _ := isAuthBlockedForModel(auth, "", now)
+	return blocked
 }
 
 // upsertAuthResultLocked updates one auth in-place after a request execution result,
@@ -1035,12 +1024,11 @@ func (s *authScheduler) upsertAuthResultLocked(auth *Auth, targetModels []string
 
 	// Check whether credential-level availability transitioned between blocked and unblocked.
 	// If credential-level availability changed, all model shards must be synchronized.
-	modelCount := len(modelSet)
 	wasBlocked := false
 	if existingMeta != nil {
-		wasBlocked = isCredentialBlocked(existingMeta.auth, modelCount, now)
+		wasBlocked = isCredentialBlocked(existingMeta.auth, now)
 	}
-	isBlocked := isCredentialBlocked(auth, modelCount, now)
+	isBlocked := isCredentialBlocked(auth, now)
 	credentialAvailabilityChanged := wasBlocked != isBlocked
 
 	if modelSetChanged || credentialScoped || credentialAvailabilityChanged || len(targetModels) == 0 {
