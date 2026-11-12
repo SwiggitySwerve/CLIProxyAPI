@@ -250,6 +250,11 @@ type Manager struct {
 	// authLoadGate allows concurrent credential transactions, but excludes whole-store reloads.
 	// Mutations acquire one permit; Load acquires all permits before reading the store.
 	authLoadGate *semaphore.Weighted
+
+	// quotaObservationFlush coalesces saves triggered only by observation changes.
+	quotaObservationFlush quotaObservationFlushState
+	// quotaObservationNow overrides the throttle clock in tests.
+	quotaObservationNow func() time.Time
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
