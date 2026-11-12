@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/providerspec"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
@@ -643,22 +644,10 @@ func ValidateOAuthState(state string) error {
 }
 
 func NormalizeOAuthProvider(provider string) (string, error) {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "anthropic", "claude":
-		return "anthropic", nil
-	case "codex", "openai":
-		return "codex", nil
-	case "antigravity", "anti-gravity":
-		return "antigravity", nil
-	case "xai", "x-ai", "x.ai", "grok":
-		return "xai", nil
-	case "devin", "cognition":
-		return "devin", nil
-	case "meta", "muse":
-		return "meta", nil
-	default:
-		return "", errUnsupportedOAuthFlow
+	if flow, ok := providerspec.OAuthFlow(provider); ok {
+		return flow, nil
 	}
+	return "", errUnsupportedOAuthFlow
 }
 
 func NormalizeOAuthCallbackProvider(provider string) (string, error) {

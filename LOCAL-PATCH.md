@@ -255,7 +255,7 @@ plus three provider-keyed maps. Grouped by the decision they make:
    - `quota_all_cooled.go:28` `allCooledTrialVerdicts` (claude), read at :151, :185, :202.
    - `conductor.go:290-291` default `QuotaRecheckAdapter`s registered by `NewManager`.
    Tests: `provider_quota_characterization_test.go`.
-2. **Quota-signal parsing into named windows (slice 2, done except 2b).** The
+2. **Quota-signal parsing into named windows (slice 2, done; 2b done in slice 4).** The
    `providerQuota` entry gained three fields (`provider_registry.go:16-25`):
    - `signalRank`: the per-provider header allowlist and retention rank, formerly
      `isQuotaSignalHeaderForProvider` and `quotaSignalRetentionRank`. Now
@@ -273,21 +273,12 @@ plus three provider-keyed maps. Grouped by the decision they make:
    each header class per provider), `RejectedCooldownSignals` and `RecheckCadence` cases
    in `provider_quota_characterization_test.go`.
 
-   **Slice 2b (not done): legacy `quota-reconcile: true` = codex clear**,
-   `internal/config/quota_reconcile.go:45` (parse) and `:91` (save back as `true`).
-   The cycle: `sdk/cliproxy/auth` imports `internal/config` (`internalconfig.Config` is
-   the manager's runtime config, e.g. `api_key_model_capabilities.go:8`), so
-   `internal/config` cannot import auth and the registry cannot answer at YAML parse
-   time. No small clean break exists. The three ways out:
-   - a config-package hook (`var LegacyQuotaReconcileProviders func() []string`) that
-     auth's `init` sets: parsing then depends on whether auth is linked into the
-     binary, so config-only tests and tools would read legacy `true` as nothing;
-   - a legacy marker in `QuotaReconcileConfig` that auth resolves: it changes the value
-     management JSON and `MarshalYAML` expose, and every reader must resolve it;
-   - moving the registry's static facts into a leaf package both import: the right
-     shape for slice 4 (which must export the registry anyway), but a larger move.
-   Each costs more than the one literal it replaces, so `"codex"` stays in config
-   until slice 4 creates the exported registry package; config can then import it.
+   **Slice 2b (done in slice 4): legacy `quota-reconcile: true` = codex clear.**
+   `internal/config/quota_reconcile.go` `QuotaReconcileFromBool` (parse) and
+   `MarshalYAML` (save back as `true`) now ask `providerspec.LegacyQuotaReconcileProvider()`.
+   The import cycle (`sdk/cliproxy/auth` imports `internal/config`) is broken by the
+   leaf package `internal/providerspec`, which imports nothing from this module.
+   Tests: `quota_reconcile_legacy_characterization_test.go`.
 3. **429 classification and cooldown scope (slice 3, done).** Whether a provider's
    rejection signals pin its cooldowns, are restored on restart and are echoed on the
    429 the hub returns is now `providerPinsCooldownSignals` (`provider_registry.go`),
@@ -307,13 +298,30 @@ plus three provider-keyed maps. Grouped by the decision they make:
    (group 7); `isTerminalRefreshError`'s Codex `invalid_grant` rule
    (`conductor_cooldown.go`) is refresh behaviour (slice 4).
    Tests: `CooldownSignalGates` in `provider_quota_characterization_test.go`.
-4. **Authenticator, login and refresh (slice 4).** `internal/api/handlers/management/`:
-   `auth_files_v8.go:406-418` `StartOAuthV8` provider to login handler, `:435,480` Kimi
-   domain, `:535` `ImportOAuthV8`; `oauth_sessions.go:647-655` `NormalizeOAuthProvider`;
-   `auth_files_provider_oauth.go:425` identityless providers; `oauth_siwc.go:54,366`
-   Codex-only SIWC bind. `sdk/cliproxy/auth/types.go:1273,1669` Codex refresh lead;
-   `sdk/auth/filestore.go:254`; `internal/watcher/synthesizer/file.go:111,212,290,308,396`;
-   `sdk/cliproxy/service_auth.go:659,662` websocket teardown on removal.
+4. **Authenticator, login and refresh (slice 4, done).** The exported part of the
+   registry is `internal/providerspec` (`Spec` per provider, `For`, `OAuthFlow`,
+   `LegacyQuotaReconcileProvider`): static facts only, no imports from this module, so
+   management handlers, `internal/config` and `sdk/cliproxy/auth` can all read it. Moved:
+   - `DefaultRefreshLead` (Codex 96h): `types.go` `ProviderRefreshLead` and the
+     `CodexOuterNeedsRefresh` fallback, both through `providerDefaultRefreshLead`.
+     `auth.CodexOuterRefreshLead` stays exported and equals the registry value.
+   - `InvalidGrantIsTerminal` (Codex): `conductor_cooldown.go` `isTerminalRefreshError`.
+   - `OAuthFlow`/`OAuthAliases`: `oauth_sessions.go` `NormalizeOAuthProvider`.
+   - `IdentitylessLogin` (kimi, kimi-ai): `auth_files_provider_oauth.go`
+     `isIdentitylessOAuthProvider`.
+   - `LegacyQuotaReconcile` (Codex): slice 2b above.
+   Tests: `provider_refresh_characterization_test.go` (auth),
+   `provider_login_characterization_test.go` (management) and the 2b test.
+   Left as switches, with the reason:
+   - `auth_files_v8.go` `StartOAuthV8` and `ImportOAuthV8`: dispatch to `Handler`
+     methods, a method table rather than a provider fact; the Kimi domain choice
+     (`normalizeOAuthProviderWithDomain`, `resolveTargetOAuthProvider`) reads Kimi's own
+     domain helpers. `oauth_siwc.go`: SIWC is a Codex-only flow by definition.
+   - `internal/watcher/synthesizer/file.go` (gemini to gemini-cli rename, Kimi domain,
+     Codex `plan_type` from the id_token, Vertex) and `sdk/auth/filestore.go:254`
+     (gemini skip): auth-file format parsing, each tied to that provider's file shape.
+   - `sdk/cliproxy/service_auth.go` websocket teardown on removal: executor wiring
+     (group 6).
 5. **Model catalog source (slice 5).** `sdk/cliproxy/service_models.go:114-200,229,240,342`;
    `internal/registry/model_definitions.go:572-590` `GetStaticModelDefinitionsByChannel`;
    `sdk/cliproxy/auth/conductor_models.go:541-561,701-721,837-847`;
@@ -340,10 +348,11 @@ plus three provider-keyed maps. Grouped by the decision they make:
    `internal/pluginhost/adapters.go:93` and `internal/auth/kimi/kimi.go:71` classify
    model families or domains.
 
-Slice order: 1, 2, 3, 4, 5, then decide on 6. Done: 1, 2 and 3; 2b is blocked (above)
-and waits for slice 4. Remaining: 4 (with 2b), 5, then the decision on 6. Slices 1-3 stay inside
-`sdk/cliproxy/auth` and extend the same `providerQuota` entry; slice 4 is where the
-registry first needs to be exported (management handlers are another package).
+Slice order: 1, 2, 3, 4, 5, then decide on 6. Done: 1, 2, 2b, 3 and 4. Remaining: 5
+(model catalog source), then the decision on 6. Slices 1-3 extend the unexported
+`providerQuota` entry in `sdk/cliproxy/auth` (behaviour that needs auth types); slice 4
+added the exported static-facts registry `internal/providerspec`. Slice 5 should add its
+facts there when another package needs them.
 
 ## Management key failures count distinct keys
 

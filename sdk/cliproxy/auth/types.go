@@ -20,6 +20,7 @@ import (
 	"github.com/gin-gonic/gin"
 	baseauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/providerspec"
 )
 
 // PostAuthHook defines a function that is called after an Auth record is created
@@ -1063,8 +1064,9 @@ func (a *Auth) ExpirationTime() (time.Time, bool) {
 
 // CodexOuterRefreshLead is the conservative proactive refresh lead time before
 // the nominal 10-day Codex OAuth JWT expiration, refreshing tokens well ahead
-// of early upstream access-token invalidation.
-const CodexOuterRefreshLead = 96 * time.Hour
+// of early upstream access-token invalidation. It is Codex's provider registry
+// default (providerspec).
+const CodexOuterRefreshLead = providerspec.CodexOuterRefreshLead
 
 // CodexSIWCRefreshLead is the minimum remaining validity required before refreshing
 // a Sign in with ChatGPT (SIWC) token, matching pi's DEFAULT_OAUTH_MINIMUM_VALIDITY_MS (5 minutes).
@@ -1232,9 +1234,8 @@ func CodexOuterNeedsRefresh(a *Auth, now time.Time) (dueAt time.Time, hasRefresh
 		provider = strings.ToLower(authMetadataString(a, "type"))
 	}
 	lead := ProviderRefreshLead(provider, a.Runtime)
-	if lead == nil && provider == "codex" {
-		d := CodexOuterRefreshLead
-		lead = &d
+	if lead == nil {
+		lead = providerDefaultRefreshLead(provider)
 	}
 	if lead == nil {
 		return time.Time{}, false, false
@@ -1628,8 +1629,13 @@ func ProviderRefreshLead(provider string, runtime any) *time.Duration {
 		}
 		return nil
 	}
-	if provider == "codex" {
-		d := CodexOuterRefreshLead
+	return providerDefaultRefreshLead(provider)
+}
+
+// providerDefaultRefreshLead returns the provider registry's default refresh
+// lead, or nil when the provider has none.
+func providerDefaultRefreshLead(provider string) *time.Duration {
+	if d := providerspec.For(provider).DefaultRefreshLead; d > 0 {
 		return &d
 	}
 	return nil

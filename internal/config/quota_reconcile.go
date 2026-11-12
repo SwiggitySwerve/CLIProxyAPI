@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/providerspec"
 	"gopkg.in/yaml.v3"
 )
 
@@ -33,8 +34,8 @@ type QuotaReconcileProvider struct {
 }
 
 // QuotaReconcileConfig maps a lowercase provider key to its recheck settings.
-// In YAML it accepts the legacy bool (true means codex in clear mode, false
-// means off) or a per-provider map.
+// In YAML it accepts the legacy bool (true means the provider registry's
+// legacy provider, Codex, in clear mode; false means off) or a per-provider map.
 type QuotaReconcileConfig map[string]QuotaReconcileProvider
 
 // QuotaReconcileFromBool converts the legacy quota-reconcile bool.
@@ -42,7 +43,7 @@ func QuotaReconcileFromBool(enabled bool) QuotaReconcileConfig {
 	if !enabled {
 		return nil
 	}
-	return QuotaReconcileConfig{"codex": {Mode: QuotaReconcileClear}}
+	return QuotaReconcileConfig{providerspec.LegacyQuotaReconcileProvider(): {Mode: QuotaReconcileClear}}
 }
 
 // Provider returns the settings for provider, or false when none are configured.
@@ -88,7 +89,7 @@ func (c QuotaReconcileConfig) MarshalYAML() (any, error) {
 	if len(c) == 0 {
 		return false, nil
 	}
-	if p, ok := c["codex"]; ok && len(c) == 1 && p == (QuotaReconcileProvider{Mode: QuotaReconcileClear}) {
+	if p, ok := c[providerspec.LegacyQuotaReconcileProvider()]; ok && len(c) == 1 && p == (QuotaReconcileProvider{Mode: QuotaReconcileClear}) {
 		return true, nil
 	}
 	return map[string]QuotaReconcileProvider(c), nil

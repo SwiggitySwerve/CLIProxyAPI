@@ -19,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/providerspec"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kimi"
 	metaauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/meta"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
@@ -421,8 +422,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 }
 
 func isIdentitylessOAuthProvider(provider string) bool {
-	trimmed := strings.ToLower(strings.TrimSpace(provider))
-	return trimmed == "kimi" || trimmed == "kimi-ai"
+	return providerspec.For(provider).IdentitylessLogin
 }
 
 func matchesOAuthRecoveryTarget(target oauthRecoveryTarget, email, accountID, candidateFileName string) bool {
