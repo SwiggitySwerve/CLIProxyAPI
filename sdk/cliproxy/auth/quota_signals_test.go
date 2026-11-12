@@ -537,17 +537,16 @@ func TestMarkResultQuotaFailureDoesNotEraseSiblingObservation(t *testing.T) {
 	if !ok || updated == nil {
 		t.Fatal("auth not found after MarkResult")
 	}
-	current := updated.ModelStates["gpt-5.3-codex"]
-	if current == nil || !current.Quota.Exceeded || current.Quota.Reason != "quota" {
-		t.Fatalf("current model cooldown missing: %#v", current)
+	for _, model := range []string{"gpt-5.3-codex", "gpt-5.4"} {
+		if blocked, reason, _ := isAuthBlockedForModel(updated, model, time.Now()); !blocked || reason != blockReasonCooldown {
+			t.Fatalf("%s not blocked by the credential quota: blocked=%v reason=%v", model, blocked, reason)
+		}
 	}
+	current := updated.ModelStates["gpt-5.3-codex"]
 	if current.Quota.Signals["X-Codex-Primary-Used-Percent"] != "99" || current.Quota.Signals["Retry-After"] != "120" {
 		t.Fatalf("current model observation was not refreshed: %#v", current.Quota.Signals)
 	}
 	sibling := updated.ModelStates["gpt-5.4"]
-	if sibling == nil || !sibling.Quota.Exceeded || sibling.Quota.Reason != "credential_quota" {
-		t.Fatalf("sibling cooldown missing: %#v", sibling)
-	}
 	if sibling.Quota.Signals["X-Codex-Primary-Used-Percent"] != "41" {
 		t.Fatalf("credential-scope cooldown erased sibling observation: %#v", sibling.Quota.Signals)
 	}

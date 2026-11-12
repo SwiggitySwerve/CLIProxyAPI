@@ -980,10 +980,11 @@ func devinQuotaObservationRestored(auth, existing *Auth, now time.Time) bool {
 
 // applyDevinQuotaRestoration releases a Devin credential-wide quota cooldown
 // early when the refreshed auth carries an authoritative, newer observation
-// showing both usage quotas available again (issue #6690). It never touches
-// unauthorized failures, non-quota failure states, or model states whose
-// block is not the auth-level credential quota propagation; unrelated
-// cooldowns survive via aggregated availability recomputation.
+// showing both usage quotas available again (issue #6690). The credential
+// quota lives on the auth, so model states keep their own cooldowns; only a
+// state that still holds a credential-derived block (an older build's
+// "credential_quota" copy, or a "quota" block carrying Devin's daily/weekly
+// exhaustion message) is released with it.
 func applyDevinQuotaRestoration(auth, existing *Auth, now time.Time) bool {
 	if !devinQuotaObservationRestored(auth, existing, now) {
 		return false
@@ -994,25 +995,13 @@ func applyDevinQuotaRestoration(auth, existing *Auth, now time.Time) bool {
 
 	applyCooldownFields(&auth.Quota, QuotaState{})
 	for _, state := range auth.ModelStates {
-		if state == nil {
+		if state == nil || !state.Quota.Exceeded {
 			continue
 		}
 		reason := strings.TrimSpace(state.Quota.Reason)
-		wrapped := state.credentialQuotaPropagated || reason == "credential_quota"
-		if !state.Quota.Exceeded || (reason != "quota" && !wrapped) {
-			continue
+		if reason == "credential_quota" || (reason == "quota" && isDevinQuotaExhaustionMessage(devinStateErrorText(state))) {
+			resetModelState(state, now)
 		}
-		// A wrapped sibling carries its independent layer in the shadow.
-		// Reinstate that exact block (if still live) instead of erasing it;
-		// the reporting model ("quota" unwrapped) and pure propagation
-		// targets (no shadow) fully release. Deadline or status heuristics
-		// cannot recover this provenance reliably.
-		if shadow := state.credentialQuotaShadow; shadow != nil && isModelStateActiveCooldown(shadow, now) {
-			*state = *shadow.cloneShallow()
-			state.UpdatedAt = now
-			continue
-		}
-		resetModelState(state, now)
 	}
 	auth.Status = StatusActive
 	auth.StatusMessage = ""
@@ -1035,13 +1024,6 @@ func isDevinQuotaExhaustionMessage(text string) bool {
 		return false
 	}
 	return strings.Contains(lower, "weekly") || strings.Contains(lower, "daily")
-}
-
-func devinRecordErrorText(record CooldownStateRecord) string {
-	if record.LastError != nil && strings.TrimSpace(record.LastError.Message) != "" {
-		return record.LastError.Message
-	}
-	return ""
 }
 
 func devinStateErrorText(state *ModelState) string {

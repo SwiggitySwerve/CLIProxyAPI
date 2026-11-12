@@ -88,9 +88,8 @@ func TestExecuteStreamQuotaFailurePreservesCooldownAndScope(t *testing.T) {
 					t.Fatalf("started stream must retain its payload and error without replay: payloads=%d failures=%d attempts=%v", payloads, failures, attempts)
 				}
 				high, _ := manager.GetByID(highID)
-				state := high.ModelStates[model]
-				if state == nil || state.NextRetryAfter.Before(before.Add(retryAfter)) {
-					t.Errorf("model cooldown lost upstream RetryAfter: state=%+v", state)
+				if blocked, _, next := isAuthBlockedForModel(high, model, time.Now()); !blocked || next.Before(before.Add(retryAfter)) {
+					t.Errorf("model cooldown lost upstream RetryAfter: blocked=%v until %v", blocked, next)
 				}
 				if credentialScoped && (high.Quota.Reason != "credential_quota" || high.Quota.NextRecoverAt.Before(before.Add(retryAfter))) {
 					t.Errorf("credential cooldown lost scope or RetryAfter: quota=%+v", high.Quota)

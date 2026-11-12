@@ -669,16 +669,15 @@ func claudeUnifiedCooldownForAuth(auth *Auth, model string, now time.Time) (bool
 	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
 		state := existingModelState(auth, model)
 		if state != nil && state.NextRetryAfter.After(auth.Quota.NextRecoverAt) {
-			if shadow := state.credentialQuotaShadow; shadow != nil {
-				if !shadow.Quota.Exceeded || !shadow.Quota.NextRecoverAt.After(now) || shadow.NextRetryAfter.After(shadow.Quota.NextRecoverAt) {
-					return false, nil
-				}
-				if strings.EqualFold(strings.TrimSpace(shadow.Quota.Reason), "cloudflare challenge") {
-					return false, nil
-				}
-				return claudeSignalsFromEvaluatedQuota(shadow.Quota)
+			// The model's own block outlasts the credential quota, so the
+			// headers describe that block.
+			if !state.Quota.Exceeded || !state.Quota.NextRecoverAt.After(now) || state.NextRetryAfter.After(state.Quota.NextRecoverAt) {
+				return false, nil
 			}
-			return false, nil
+			if strings.EqualFold(strings.TrimSpace(state.Quota.Reason), "cloudflare challenge") {
+				return false, nil
+			}
+			return claudeSignalsFromEvaluatedQuota(state.Quota)
 		}
 		if ok, signals := claudeSignalsFromEvaluatedQuota(auth.Quota); ok {
 			return true, signals
@@ -705,9 +704,6 @@ func claudeUnifiedCooldownForAuth(auth *Auth, model string, now time.Time) (bool
 			found := false
 			for _, key := range keys {
 				st := auth.ModelStates[key]
-				if st != nil && (st.credentialQuotaPropagated || st.Quota.Reason == "credential_quota") {
-					st = st.credentialQuotaShadow
-				}
 				if st == nil || !st.Quota.Exceeded || !st.Quota.NextRecoverAt.After(now) || st.NextRetryAfter.After(st.Quota.NextRecoverAt) {
 					return false, nil
 				}
@@ -727,9 +723,6 @@ func claudeUnifiedCooldownForAuth(auth *Auth, model string, now time.Time) (bool
 			return found, earliestSignals
 		}
 		state := existingModelState(auth, model)
-		if state != nil && (state.credentialQuotaPropagated || state.Quota.Reason == "credential_quota") {
-			state = state.credentialQuotaShadow
-		}
 		if state == nil || !state.Quota.Exceeded || !state.Quota.NextRecoverAt.After(now) || state.NextRetryAfter.After(state.Quota.NextRecoverAt) {
 			return false, nil
 		}

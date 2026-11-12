@@ -276,6 +276,9 @@ func (m *Manager) clientModelProjectionForAuth(auth *Auth, routeModel string, no
 			isQuotaExceeded = true
 		}
 	}
+	if credQuotaSuspended {
+		isQuotaExceeded = true
+	}
 
 	var authFallbackUntil time.Time
 	if len(auth.ModelStates) == 0 {
@@ -304,16 +307,18 @@ func (m *Manager) clientModelProjectionForAuth(auth *Auth, routeModel string, no
 			if suspendReason == "" {
 				suspendReason = "unauthorized"
 			}
-		case stateSuspended:
+		case stateSuspended && !credQuotaSuspended:
 			suspendReason = cooldownReason(state.StatusMessage, state.Quota, state.LastError)
 			suspendUntil = stateUntil
-			if credQuotaSuspended && (strings.EqualFold(suspendReason, "quota") || strings.EqualFold(suspendReason, "credential_quota")) && credQuotaUntil.After(suspendUntil) {
-				suspendUntil = credQuotaUntil
-			}
 		default:
+			// A credential quota suspends every model; a model's own longer
+			// block only extends the deadline, as the availability gate does.
 			suspendUntil = authFallbackUntil
 			if credQuotaUntil.After(suspendUntil) {
 				suspendUntil = credQuotaUntil
+			}
+			if stateUntil.After(suspendUntil) {
+				suspendUntil = stateUntil
 			}
 		}
 		if suspendReason == "" {

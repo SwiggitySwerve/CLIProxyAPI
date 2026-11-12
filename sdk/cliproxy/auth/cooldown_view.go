@@ -29,7 +29,8 @@ func CooldownSnapshotForAuth(auth *Auth, now time.Time) []CooldownView {
 	}
 	// Match the explicit credential-wide gate in isAuthBlockedForModel. Other
 	// auth-level fields can be model aggregates and must not become global gates.
-	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
+	credentialQuotaLive := auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now)
+	if credentialQuotaLive {
 		views = append(views, newCooldownView("credential", "", auth.Quota.NextRecoverAt, now, auth.Quota, auth.StatusMessage, auth.LastError))
 	} else if len(auth.ModelStates) == 0 {
 		if blocked, _, next := availabilityBlock(auth.Unavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now); blocked && next.After(now) {
@@ -56,7 +57,13 @@ func CooldownSnapshotForAuth(auth *Auth, now time.Time) []CooldownView {
 			continue
 		}
 		blocked, reason, next := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now)
-		if !blocked || !next.After(now) {
+		quota, statusMessage, lastErr := state.Quota, state.StatusMessage, state.LastError
+		if credentialQuotaLive && (!blocked || next.Before(auth.Quota.NextRecoverAt)) {
+			// The credential quota holds this model at least as long as its own
+			// block does, as the availability gate reports it.
+			reason, next = blockReasonCooldown, auth.Quota.NextRecoverAt
+			quota, statusMessage, lastErr = auth.Quota, auth.StatusMessage, auth.LastError
+		} else if !blocked || !next.After(now) {
 			continue
 		}
 		modelName := model
@@ -70,7 +77,7 @@ func CooldownSnapshotForAuth(auth *Auth, now time.Time) []CooldownView {
 			}
 		}
 		byModel[lookupKey] = modelCooldown{
-			view:   newCooldownView("model", modelName, next, now, state.Quota, state.StatusMessage, state.LastError),
+			view:   newCooldownView("model", modelName, next, now, quota, statusMessage, lastErr),
 			reason: reason,
 		}
 	}

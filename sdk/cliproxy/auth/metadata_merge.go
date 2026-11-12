@@ -160,19 +160,6 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 	merged.Quota = mergeQuotaObservation(merged.Quota, updated.Quota)
 
 	// 3. ModelStates: three-way merge to preserve concurrent cooldown/quota
-	// Independent layers follow the same current-wins rule: executor refresh
-	// results are derived from the base snapshot and never move them.
-	for model, mergedState := range merged.ModelStates {
-		if mergedState == nil {
-			continue
-		}
-		if currentState := current.ModelStates[model]; currentState != nil {
-			if currentState.credentialQuotaShadow != nil && mergedState.credentialQuotaShadow == nil {
-				mergedState.credentialQuotaShadow = currentState.credentialQuotaShadow.cloneShallow()
-			}
-			mergedState.credentialQuotaPropagated = mergedState.credentialQuotaPropagated || currentState.credentialQuotaPropagated
-		}
-	}
 	var baseModels map[string]*ModelState
 	if base != nil {
 		baseModels = base.ModelStates
