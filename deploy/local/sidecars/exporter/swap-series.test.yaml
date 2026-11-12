@@ -12,15 +12,15 @@ tests:
       - series: 'cliproxy_tokens_total{client="SwapClient",type="input",provider="claude",account="SwapAccount",model="model"}'
         values: '0+1800000x2004 stale _x11'
       - series: 'cliproxy_tokens_total{client="SwapClient",type="input",provider="claude",account="SwapAccount",model="model",source="prox-usage"}'
-        values: '_x2004 9000000000+1800000x11'
+        values: '_x2005 9000000000+1800000x11'
       - series: 'cliproxy_requests_total{client="SwapClient",account="SwapAccount",provider="claude",model="model",status="success"}'
         values: '0+120x2004 stale _x11'
       - series: 'cliproxy_requests_total{client="SwapClient",account="SwapAccount",provider="claude",model="model",status="success",source="prox-usage"}'
-        values: '_x2004 90000000+120x11'
+        values: '_x2005 90000000+120x11'
       - series: 'cliproxy_requests_total{client="SwapClient",account="SwapAccount",provider="claude",model="model",status="failed"}'
         values: '0+6x2004 stale _x11'
       - series: 'cliproxy_requests_total{client="SwapClient",account="SwapAccount",provider="claude",model="model",status="failed",source="prox-usage"}'
-        values: '_x2004 900000000+6x11'
+        values: '_x2005 900000000+6x11'
     alert_rule_test:
       - eval_time: 167h10m
         alertname: CliProxyClientTokenRateHigh

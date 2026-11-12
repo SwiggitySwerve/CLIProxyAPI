@@ -21,6 +21,12 @@ source health and unrelated collectors remain available. Reload errors with a
 last-good configuration can keep publishing. An explicit empty alias map counts
 as loaded and deliberately uses `key <hash[:8]>` / `unknown` client fallbacks.
 
+swervebox #80 adds `honorLabels: true` to the exporter ServiceMonitor so the
+exporter's health `service` and `instance` labels remain those names instead of
+`exported_service` / `exported_instance`. Coordinate that monitoring change with
+health alert queries. Usage counters carry neither label, so their source-identity
+swap and label-set gate are unaffected.
+
 ## Required pre-swap gates
 
 1. **Finish Step B's full history import BEFORE switching.** Otherwise the import
@@ -99,6 +105,9 @@ cover the two lossy historical account cases, escapes, and changes in each set.
 ```sh
 PYTHONDONTWRITEBYTECODE=1 TMPDIR=/dev/shm ionice -c3 nice -n10 python3 -m unittest deploy/local/sidecars/exporter/test_exporter.py
 ```
+
+Promtool 3.15.0 passes `swap-series.test.yaml` against the 13 rules extracted from
+swervebox `origin/main`. The `_x2005` prefixes place the new series at 167h5m.
 
 All tests use tmpfs or in-memory synthetic data and ephemeral loopback stubs. A
 suite-wide socket guard fails any attempted access to live service ports.
