@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install the local sidecars (rerank, exporter, recovery-check, catalog) and their systemd units to their live
+# Install the local sidecars (rerank, exporter, recovery-check, catalog, connect) and their systemd units to their live
 # locations. Shows a diff for every file first; with --apply, backs the originals up to
 #   ~/.local/share/cli-proxy-backups/<timestamp>/   (undo with rollback.sh)
 # and then copies. Dry-run is the default: nothing is written without --apply.
@@ -42,6 +42,7 @@ FILES=(
   "$SRC/recovery-check/cli-proxy-recovery-check.timer|$UNITS/cli-proxy-recovery-check.timer|0644"
   "$SRC/catalog/cli-proxy-catalog|$BIN/cli-proxy-catalog|0700"
   "$SRC/catalog/cli-proxy-catalog.service|$UNITS/cli-proxy-catalog.service|0644"
+  "$SRC/connect/cli-proxy-connect|$BIN/cli-proxy-connect|0700"
 )
 
 # Config the scripts read. Created only when missing, never overwritten.
