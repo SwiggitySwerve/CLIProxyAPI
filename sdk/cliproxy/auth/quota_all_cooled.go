@@ -69,13 +69,16 @@ type allCooledRound struct {
 	probed  bool
 	trials  int
 	budget  int
+	// requestRetry and retryRound say whether a retry round follows this one.
+	requestRetry int
+	retryRound   int
 	// finalErr is the error the request returned before the round existed. It
 	// is returned unchanged when no recheck succeeds.
 	finalErr error
 }
 
-func newAllCooledRound(requestRetry int) *allCooledRound {
-	return &allCooledRound{budget: max(requestRetry, 0) + 1}
+func newAllCooledRound(requestRetry, retryRound int) *allCooledRound {
+	return &allCooledRound{budget: max(requestRetry, 0) + 1, requestRetry: requestRetry, retryRound: retryRound}
 }
 
 // errOr returns the error captured when the round started, or fallback when
@@ -116,11 +119,12 @@ func (m *Manager) allCooledNext(ctx context.Context, round *allCooledRound, prov
 		if cfg == nil || cfg.Home.Enabled || len(cfg.QuotaReconcile) == 0 {
 			return nil, nil, nil, "", false
 		}
-		// A credential this request already tried that holds no quota cooldown
-		// failed for another reason (a dropped connection, a 5xx). The pool is
-		// not all cooled: the request's own retry goes back to it, so no
-		// half-open trial is spent on the cooled ones.
-		if m.triedCredentialWithoutQuotaCooldown(providers, tried) {
+		// A credential this request already tried that is still selectable (a
+		// dropped connection does not cool it) and that a following retry round
+		// will try again means the pool is not all cooled: the request's own
+		// retry goes back to it, so no half-open trial is spent on the cooled
+		// ones. A failure that cooled it, or no retry round left, keeps the trial.
+		if isRequestRetryRoundError(finalErr) && m.triedCredentialWithoutQuotaCooldown(ctx, round, providers, model, opts, tried) {
 			return nil, nil, nil, "", false
 		}
 		round.started = true
@@ -210,9 +214,10 @@ func (m *Manager) allCooledAdapterRecheck(ctx context.Context, cfg *internalconf
 	return cleared
 }
 
-// triedCredentialWithoutQuotaCooldown reports whether tried holds an enabled
-// credential of one of providers that is not in a quota cooldown.
-func (m *Manager) triedCredentialWithoutQuotaCooldown(providers []string, tried map[string]struct{}) bool {
+// triedCredentialWithoutQuotaCooldown reports whether tried holds a credential
+// of one of providers that is selectable for model now and that a following
+// retry round of this request will try again.
+func (m *Manager) triedCredentialWithoutQuotaCooldown(ctx context.Context, round *allCooledRound, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) bool {
 	if len(tried) == 0 {
 		return false
 	}
@@ -222,11 +227,15 @@ func (m *Manager) triedCredentialWithoutQuotaCooldown(providers []string, tried 
 			providerSet[norm] = struct{}{}
 		}
 	}
+	now := time.Now()
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for id := range tried {
 		auth := m.auths[id]
-		if auth == nil || auth.Disabled || authHasQuotaCooldown(auth) {
+		if auth == nil || round.retryRound >= effectiveRequestRetryLimit(auth, round.requestRetry) {
+			continue
+		}
+		if blocked, _, _ := isAuthBlockedForModelForRequest(ctx, auth, m.selectionModelForAuth(auth, model), now, opts.Headers); blocked {
 			continue
 		}
 		if _, ok := providerSet[executorKeyFromAuth(auth)]; len(providerSet) > 0 && !ok {

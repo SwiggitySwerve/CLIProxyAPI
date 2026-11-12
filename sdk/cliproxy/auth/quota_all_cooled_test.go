@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -52,9 +53,10 @@ type allCooledExecutor struct {
 	calls    map[string]int
 	// served overrides the headers of a lifted credential's 200.
 	served http.Header
-	// transient counts upcoming non-quota failures (a dropped connection) per
-	// credential; each Execute call on it consumes one.
-	transient map[string]int
+	// transient counts upcoming non-quota failures per credential; each call on
+	// it consumes one and returns transientErr (a dropped connection when nil).
+	transient    map[string]int
+	transientErr error
 }
 
 func newAllCooledExecutor(provider string) *allCooledExecutor {
@@ -100,20 +102,23 @@ func (e *allCooledExecutor) callCount(id string) int {
 	return e.calls[id]
 }
 
-func (e *allCooledExecutor) takeTransient(id string) bool {
+func (e *allCooledExecutor) takeTransient(id string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.transient[id] == 0 {
-		return false
+		return nil
 	}
 	e.transient[id]--
 	e.calls[id]++
-	return true
+	if e.transientErr != nil {
+		return e.transientErr
+	}
+	return fmt.Errorf("claude tls: handshake upstream: read: %w", syscall.ECONNRESET)
 }
 
 func (e *allCooledExecutor) Execute(ctx context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	if e.takeTransient(auth.ID) {
-		return cliproxyexecutor.Response{}, fmt.Errorf("claude tls: handshake upstream: read: %w", syscall.ECONNRESET)
+	if errTransient := e.takeTransient(auth.ID); errTransient != nil {
+		return cliproxyexecutor.Response{}, errTransient
 	}
 	if e.attempt(ctx, auth.ID) {
 		return cliproxyexecutor.Response{Payload: []byte(`{"served_by":"` + auth.ID + `"}`), Headers: e.servedHeaders()}, nil
@@ -124,6 +129,9 @@ func (e *allCooledExecutor) Execute(ctx context.Context, auth *Auth, _ cliproxye
 // ExecuteStream reports a rejection inside the stream, before any payload,
 // which is the harder case: the HTTP call itself returned a stream.
 func (e *allCooledExecutor) ExecuteStream(ctx context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	if errTransient := e.takeTransient(auth.ID); errTransient != nil {
+		return nil, errTransient
+	}
 	ch := make(chan cliproxyexecutor.StreamChunk, 2)
 	if e.attempt(ctx, auth.ID) {
 		ch <- cliproxyexecutor.StreamChunk{Payload: []byte("data: served_by " + auth.ID + "\n\n")}
@@ -312,28 +320,65 @@ func TestAllCooledTrialClearFeedsFlapBackoff(t *testing.T) {
 }
 
 // A healthy credential that failed this request for a non-quota reason (the
-// 2026-11-12 08:43 case: a TLS reset) means the pool is not all cooled. No
-// half-open trial runs on the cooled credentials; the request retries on the
-// healthy one instead.
-func TestAllCooledTrialSkippedWhenTriedCredentialIsHealthy(t *testing.T) {
-	f := newAllCooledFixture(t, nil, internalconfig.QuotaReconcileClear, "claude-a", "claude-b")
-	// As on the operator's Claude instance: request-retry 2, max-retry-interval 30s.
-	f.manager.SetRetryConfig(2, 30*time.Second, 0)
-	f.cool(t, "claude-b")
-	f.executor.lift("claude-a")
-	f.executor.mu.Lock()
-	f.executor.transient = map[string]int{"claude-a": 1}
-	f.executor.mu.Unlock()
+// 2026-11-12 08:43 case: a TLS reset) and that the request's retry will try
+// again means the pool is not all cooled: no half-open trial runs on the cooled
+// credentials. When the retry will not come back to it (a failure that cools it,
+// or no retry round left), the trial still runs.
+func TestAllCooledTrialSkippedOnlyWhileTriedCredentialWillBeRetried(t *testing.T) {
+	cases := []struct {
+		name         string
+		stream       bool
+		requestRetry int
+		transientErr error
+		wantServedBy string
+		wantBCalls   int
+	}{
+		{name: "connection reset, retry follows", requestRetry: 2, wantServedBy: "claude-a", wantBCalls: 0},
+		{name: "connection reset, retry follows, stream", stream: true, requestRetry: 2, wantServedBy: "claude-a", wantBCalls: 0},
+		{name: "500 cools the tried credential", requestRetry: 2, transientErr: &Error{HTTPStatus: http.StatusInternalServerError, Message: "upstream 500"}, wantServedBy: "claude-b", wantBCalls: 1},
+		{name: "no retry round left", requestRetry: 0, wantServedBy: "claude-b", wantBCalls: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAllCooledFixture(t, nil, internalconfig.QuotaReconcileClear, "claude-a", "claude-b")
+			// As on the operator's Claude instance: max-retry-interval 30s.
+			f.manager.SetRetryConfig(tc.requestRetry, 30*time.Second, 0)
+			f.cool(t, "claude-b")
+			f.executor.lift("claude-a")
+			f.executor.lift("claude-b")
+			f.executor.mu.Lock()
+			f.executor.transient = map[string]int{"claude-a": 1}
+			f.executor.transientErr = tc.transientErr
+			f.executor.mu.Unlock()
 
-	resp, err := f.execute(cliproxyexecutor.Options{})
-	if err != nil {
-		t.Fatalf("Execute error = %v, want the retry served by claude-a", err)
-	}
-	if string(resp.Payload) != `{"served_by":"claude-a"}` {
-		t.Fatalf("payload = %s, want served by claude-a", resp.Payload)
-	}
-	if calls := f.executor.callCount("claude-b"); calls != 0 {
-		t.Fatalf("cooled claude-b was trialled %d time(s) while claude-a was healthy", calls)
+			var servedBy string
+			if tc.stream {
+				result, err := f.manager.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: f.model}, cliproxyexecutor.Options{Stream: true})
+				if err != nil {
+					t.Fatalf("ExecuteStream error = %v", err)
+				}
+				var body string
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						t.Fatalf("stream carried an error chunk: %v", chunk.Err)
+					}
+					body += string(chunk.Payload)
+				}
+				servedBy = strings.TrimSuffix(strings.TrimPrefix(body, "data: served_by "), "\n\n")
+			} else {
+				resp, err := f.execute(cliproxyexecutor.Options{})
+				if err != nil {
+					t.Fatalf("Execute error = %v", err)
+				}
+				servedBy = strings.TrimSuffix(strings.TrimPrefix(string(resp.Payload), `{"served_by":"`), `"}`)
+			}
+			if servedBy != tc.wantServedBy {
+				t.Fatalf("served by %q, want %q", servedBy, tc.wantServedBy)
+			}
+			if calls := f.executor.callCount("claude-b"); calls != tc.wantBCalls {
+				t.Fatalf("cooled claude-b called %d time(s), want %d", calls, tc.wantBCalls)
+			}
+		})
 	}
 }
 
