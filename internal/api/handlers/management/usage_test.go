@@ -38,9 +38,10 @@ func TestGetUsageQueuePopsRequestedRecords(t *testing.T) {
 		requireRecordID(t, payload[1], 2)
 
 		remaining := redisqueue.PopOldest(10)
-		if len(remaining) != 1 || string(remaining[0]) != `{"id":3}` {
+		if len(remaining) != 1 {
 			t.Fatalf("remaining queue = %q, want third item only", remaining)
 		}
+		requireRecordID(t, remaining[0], 3)
 	})
 }
 
@@ -60,9 +61,10 @@ func TestGetUsageQueueInvalidCountDoesNotPop(t *testing.T) {
 		}
 
 		remaining := redisqueue.PopOldest(10)
-		if len(remaining) != 1 || string(remaining[0]) != `{"id":1}` {
+		if len(remaining) != 1 {
 			t.Fatalf("remaining queue = %q, want original item", remaining)
 		}
+		requireRecordID(t, remaining[0], 1)
 	})
 }
 
