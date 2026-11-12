@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+"""Read-only quota observer for CLIProxyAPI credentials.
+
+Reads each credential's upstream usage (weekly quota used %, reset time, limited
+flag) through the proxy's usage relay and writes an advisory ranking (soonest
+weekly reset first) to state.json for the Prometheus exporter. It never changes
+the proxy: routing order is the proxy's own routing.strategy (soonest-reset),
+which compares credentials that share a priority. The only management calls are
+GET requests and the POST /requests/api-call usage read; --trace logs each one.
+
+A probe that fails (timeout, HTTP 429 from the usage endpoint, bad body) records
+the credential as `unknown` and keeps its previous reading with its original
+`observed_at`; a failure never marks a credential limited.
+"""
+import functools
+import json
+import os
+import re
+import sys
+import time
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+# Proxy instances come from the shared instance map (deploy/local/instances.example.json);
+# the built-in values apply when the file is missing.
+INSTANCES_FILE = Path(os.environ.get("CLI_PROXY_INSTANCES") or Path.home() / ".config/cli-proxy/instances.json")
+BUILTIN_INSTANCES = [
+    {"id": "claude-primary", "provider": "claude", "base_url": "http://127.0.0.1:8319", "management_path": "/v8/management"},
+    {"id": "codex-primary", "provider": "codex", "base_url": "http://127.0.0.1:8317", "management_path": "/v8/management"},
+]
+
+
+def load_instances():
+    try:
+        return json.loads(INSTANCES_FILE.read_text())["instances"]
+    except FileNotFoundError:
+        return BUILTIN_INSTANCES
+
+
+MGMT = [(i["id"], i["base_url"].rstrip("/") + i.get("management_path", "/v8/management")) for i in load_instances()]
+KEY = (Path.home() / ".config/cli-proxy-rerank/management-key").read_text().strip()
+AUTH_DIR = Path.home() / ".local/share/cli-proxy-api/auth"
+DRY_RUN = "--dry-run" in sys.argv  # probe and print, but do not write state.json
+TRACE = "--trace" in sys.argv  # log every management request to stderr
+# Last ranking, read by the Prometheus exporter (cli-proxy-exporter).
+STATE = Path(os.environ.get("CLI_PROXY_RERANK_STATE") or Path.home() / ".local/share/cli-proxy-rerank/state.json")
+# The Claude usage probe uses the User-Agent the Claude proxy is configured with
+# (written by cli-proxy-claude-ua-sync into header-defaults); this is the image default if unreadable.
+CLAUDE_CONFIG = Path(os.environ.get("CLI_PROXY_CLAUDE_CONFIG") or Path.home() / ".local/share/cli-proxy-claude/config.yaml")
+CLAUDE_UA_FALLBACK = "claude-cli/2.1.280 (external, cli)"
+REQUEST_COUNTS = {}
+
+
+@functools.lru_cache(maxsize=None)
+def claude_user_agent():
+    try:
+        m = re.search(r'header-defaults:\s*\n\s+user-agent:\s*"([^"]+)"', CLAUDE_CONFIG.read_text())
+    except OSError:
+        m = None
+    if not m:
+        print(f"claude: no header-defaults user-agent in {CLAUDE_CONFIG.name}; using {CLAUDE_UA_FALLBACK}", file=sys.stderr)
+    return m.group(1) if m else CLAUDE_UA_FALLBACK
+
+
+def mgmt(base, method, path, body=None):
+    # Read-only contract: any GET, and the POST that relays an upstream usage read. Nothing else.
+    if not (method == "GET" or (method == "POST" and path == "/requests/api-call")):
+        raise RuntimeError(f"refusing {method} {path}: rerank is read-only")
+    REQUEST_COUNTS[method] = REQUEST_COUNTS.get(method, 0) + 1
+    if TRACE:
+        target = f" -> {body['url'].split('?')[0]}" if body else ""
+        print(f"trace: {method} {base}{path}{target}", file=sys.stderr)
+    req = urllib.request.Request(
+        base + path,
+        method=method,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Authorization": f"Bearer {KEY}", "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.load(resp)
+
+
+def upstream(cred, url, headers):
+    headers = {"Authorization": "Bearer $TOKEN$", **headers}
+    r = mgmt(cred["_base"], "POST", "/requests/api-call",
+             {"auth_index": cred["auth_index"], "method": "GET", "url": url, "header": headers})
+    if r.get("status_code") != 200:
+        raise RuntimeError(f"upstream HTTP {r.get('status_code')}")
+    return json.loads(r["body"])
+
+
+def codex_quota(cred):
+    account_id = json.loads((AUTH_DIR / cred["name"]).read_text()).get("account_id", "")
+    u = upstream(cred, "https://chatgpt.com/backend-api/wham/usage",
+                 {"Chatgpt-Account-Id": account_id, "User-Agent": "codex-tui/0.149.1"})
+    rl = u.get("rate_limit") or {}
+    windows = [w for w in (rl.get("primary_window"), rl.get("secondary_window")) if w]
+    if not windows:
+        raise RuntimeError("no rate-limit windows")
+    weekly = max(windows, key=lambda w: w.get("limit_window_seconds") or 0)
+    limited = rl.get("limit_reached") or not rl.get("allowed", True) or any(
+        (w.get("used_percent") or 0) >= 100 for w in windows)
+    reset = datetime.fromtimestamp(weekly["reset_at"], timezone.utc)
+    EXTRAS[cred.get("email")] = codex_extras(u)
+    return reset, weekly.get("used_percent"), limited
+
+
+def claude_quota(cred):
+    u = upstream(cred, "https://api.anthropic.com/api/oauth/usage",
+                 {"anthropic-beta": "oauth-2025-04-20", "User-Agent": claude_user_agent()})
+    weekly = u["seven_day"]
+    limited = any((w or {}).get("utilization", 0) >= 100 for w in (u.get("five_hour"), weekly))
+    reset = datetime.fromisoformat(weekly["resets_at"])
+    EXTRAS[cred.get("email")] = claude_extras(u)
+    return reset, weekly.get("utilization"), limited
+
+
+PROBES = {"codex": codex_quota, "claude": claude_quota}
+
+# Credit / spend-limit details captured as a side effect of the same usage calls,
+# keyed by account email, for the exporter (no extra upstream requests).
+EXTRAS = {}
+
+
+def _num(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def codex_extras(u):
+    credits = u.get("credits") or {}
+    local = credits.get("approx_local_messages") or [None, None]
+    cloud = credits.get("approx_cloud_messages") or [None, None]
+    resets = u.get("rate_limit_reset_credits") or {}
+    return {
+        "credits_balance": _num(credits.get("balance")),
+        "credits_has": credits.get("has_credits"),
+        "credits_unlimited": credits.get("unlimited"),
+        "credits_overage_reached": credits.get("overage_limit_reached"),
+        "credits_approx_local_messages": [_num(x) for x in local[:2]],
+        "credits_approx_cloud_messages": [_num(x) for x in cloud[:2]],
+        "reset_credits_available": resets.get("available_count"),
+    }
+
+
+def claude_extras(u):
+    limits = []
+    for key, window in u.items():
+        if isinstance(window, dict) and window.get("limit_dollars") is not None:
+            limits.append({"window": key, "limit_usd": _num(window.get("limit_dollars")),
+                           "used_usd": _num(window.get("used_dollars")),
+                           "remaining_usd": _num(window.get("remaining_dollars")),
+                           "resets_at": window.get("resets_at")})
+    extra = u.get("extra_usage") or {}
+    return {
+        "spend_limits": limits,
+        "extra_usage_enabled": extra.get("is_enabled"),
+        # extra_usage amounts are reported in cents
+        "extra_usage_monthly_limit_usd": (_num(extra.get("monthly_limit")) or 0) / 100 if extra.get("monthly_limit") is not None else None,
+        "extra_usage_used_usd": (_num(extra.get("used_credits")) or 0) / 100 if extra.get("used_credits") is not None else None,
+    }
+
+
+def load_previous():
+    """Last written readings by (provider, account), for failed probes to fall back on."""
+    try:
+        state = json.loads(STATE.read_text())
+    except (OSError, ValueError):
+        return {}
+    return {(a["provider"], a["account"]): {"observed_at": state.get("updated_at"), **a}
+            for a in state.get("accounts", [])}
+
+
+def main():
+    creds = []
+    for inst_id, base in MGMT:
+        try:
+            files = mgmt(base, "GET", "/credentials")["files"]
+        except Exception as e:  # one instance down must not hide the other
+            print(f"{inst_id}: credentials unreadable: {e}", file=sys.stderr)
+            continue
+        for c in files:
+            creds.append({**c, "_base": base, "_instance": inst_id})
+    by_provider = {}
+    for c in creds:
+        if c.get("provider") in PROBES and not c.get("disabled"):
+            by_provider.setdefault(c["provider"], []).append(c)
+
+    previous = load_previous()
+    now = time.time()
+    state = {"updated_at": now, "accounts": []}
+    for provider, group in sorted(by_provider.items()):
+        readings = []
+        for c in group:
+            email = c["email"]
+            try:
+                reset, used, limited = PROBES[provider](c)
+                reading = {"limited": bool(limited), "used_percent": used, "reset_at": reset.timestamp(),
+                           "observed_at": now, "probe_status": "ok", "probe_error": None,
+                           **EXTRAS.get(email, {})}
+            except Exception as e:
+                # Unreadable quota is `unknown`, not limited: keep the previous reading and its age.
+                print(f"{provider}: {email}: quota check failed: {e}", file=sys.stderr)
+                reading = {"limited": False, "used_percent": None, "reset_at": None, "observed_at": None,
+                           **{k: v for k, v in previous.get((provider, email), {}).items()
+                              if k not in ("rank", "priority")},
+                           "probe_status": "unknown", "probe_error": f"{type(e).__name__}: {e}"[:120]}
+            readings.append((email, c, reading))
+        readings.sort(key=lambda r: (r[2]["limited"], r[2]["reset_at"] is None, r[2]["reset_at"] or 0, r[0]))
+
+        for i, (email, c, r) in enumerate(readings):
+            if r["probe_status"] == "ok":
+                note = "LIMITED" if r["limited"] else f"{r['used_percent']}% used"
+            else:
+                age = "never read" if r["observed_at"] is None else f"read {round((now - r['observed_at']) / 60)}m ago"
+                note = f"unknown ({age})"
+            when = "unknown" if r["reset_at"] is None else datetime.fromtimestamp(r["reset_at"]).strftime("%a %b %d %H:%M")
+            print(f"{provider}: #{i + 1} {email:28} resets {when}  {note}  priority {c.get('priority')}")
+            # `priority` is the proxy's current value (this script no longer sets it).
+            state["accounts"].append({
+                "provider": provider, "account": email, "rank": i + 1, "priority": c.get("priority"),
+                "instance": c["_instance"], "auth_index": c.get("auth_index"), **r,
+            })
+    print("management requests: " + ", ".join(f"{m}={n}" for m, n in sorted(REQUEST_COUNTS.items()))
+          + " (read-only: no PATCH/PUT/DELETE)")
+    if not DRY_RUN:
+        STATE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = STATE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state))
+        tmp.replace(STATE)
+
+
+if __name__ == "__main__":
+    main()
