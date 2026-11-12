@@ -3,11 +3,11 @@
 # window, B is healthy. Asserts that the proxy serves the request via B and cools A.
 #
 # Part 1: A's reset is 2h ahead. A is tried first (higher priority), the 429 puts it
-#   in cooldown, the request succeeds via B, and follow-up requests skip A.
+#   in cooldown, the request succeeds via B, follow-up requests skip A, and A's entry in
+#   GET /v8/management/credentials carries next_retry_after within reset + 1..30s.
 # Part 2 (skipped by --quick): A's reset is ~20s ahead. A must stay cooled until the
-#   mock's reset plus the 1-30s jitter the code adds, then be tried again. This is
-#   how the cooldown deadline is checked, because API-key credentials are not
-#   listed by GET /v8/management/credentials (so next_retry_after cannot be read).
+#   mock's reset plus the 1-30s jitter the code adds, then be tried again. This
+#   cross-checks the next_retry_after that part 1 read from the credentials listing.
 #
 # Template for later scenarios: copy this file, change the mock_set lines and asserts.
 set -euo pipefail
@@ -40,8 +40,19 @@ else
   fail "proxy never parsed Anthropic reset headers"
 fi
 
-listed=$(curl -fsS -H "Authorization: Bearer $(mgmt_key)" "$(proxy_url)/v8/management/credentials" | jq '.files | length')
-echo "note: /v8/management/credentials lists $listed entries (config API-key credentials are not listed)"
+# The v8 credentials listing includes config API-key credentials (kind config_api_key).
+# A is the claude entry with priority 10. Its deadline must be reset + 1..30s jitter.
+a_entry=$(curl -fsS -H "Authorization: Bearer $(mgmt_key)" "$(proxy_url)/v8/management/credentials" |
+  jq -c '[.files[] | select(.kind == "config_api_key" and .provider == "claude" and .priority == 10)] | .[0] // empty')
+[ -n "$a_entry" ] || fail "credential A is not in the v8 credentials listing"
+a_retry=$(jq -r '.next_retry_after // empty' <<<"$a_entry")
+[ -n "$a_retry" ] || fail "A's listing entry has no next_retry_after: $a_entry"
+a_retry_ts=$(date -d "$a_retry" +%s)
+echo "A next_retry_after=$a_retry, mock reset_at=$reset_at"
+check "A's next_retry_after is within reset + 1..30s jitter" \
+  awk -v t="$a_retry_ts" -v r="$reset_at" -v s="$SLACK" 'BEGIN{exit !(t >= r + 1 - s && t <= r + 30 + s)}'
+check "A's listing shows a credential cooldown with a retry deadline" \
+  jq -e 'any(.cooldowns[]; .scope == "credential" and .retry_at != null)' <<<"$a_entry"
 
 [ "${1:-}" != "--quick" ] || { echo "PASS (quick: timing part skipped)"; exit 0; }
 
