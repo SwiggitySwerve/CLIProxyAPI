@@ -123,8 +123,10 @@ func (m *Manager) allCooledNext(ctx context.Context, round *allCooledRound, prov
 		// dropped connection does not cool it) and that a following retry round
 		// will try again means the pool is not all cooled: the request's own
 		// retry goes back to it, so no half-open trial is spent on the cooled
-		// ones. A failure that cooled it, or no retry round left, keeps the trial.
-		if isRequestRetryRoundError(finalErr) && m.triedCredentialWithoutQuotaCooldown(ctx, round, providers, model, opts, tried) {
+		// ones. A failure that cooled it, no retry round left, or a round that
+		// ended in a 429 (the next round would wait a quota floor first) keeps
+		// the trial.
+		if isRequestRetryRoundError(finalErr) && statusCodeFromError(finalErr) != http.StatusTooManyRequests && m.triedCredentialRetriedNextRound(ctx, round, providers, model, opts, tried) {
 			return nil, nil, nil, "", false
 		}
 		round.started = true
@@ -214,10 +216,10 @@ func (m *Manager) allCooledAdapterRecheck(ctx context.Context, cfg *internalconf
 	return cleared
 }
 
-// triedCredentialWithoutQuotaCooldown reports whether tried holds a credential
+// triedCredentialRetriedNextRound reports whether tried holds a credential
 // of one of providers that is selectable for model now and that a following
 // retry round of this request will try again.
-func (m *Manager) triedCredentialWithoutQuotaCooldown(ctx context.Context, round *allCooledRound, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) bool {
+func (m *Manager) triedCredentialRetriedNextRound(ctx context.Context, round *allCooledRound, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) bool {
 	if len(tried) == 0 {
 		return false
 	}

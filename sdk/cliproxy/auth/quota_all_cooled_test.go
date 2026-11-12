@@ -382,6 +382,32 @@ func TestAllCooledTrialSkippedOnlyWhileTriedCredentialWillBeRetried(t *testing.T
 	}
 }
 
+// When another credential's fresh 429 ends the round, the next retry round would
+// first wait a quota floor (or not run at all with a short max-retry-interval),
+// so the trial on the cooled pool still runs even though a reset credential is
+// selectable.
+func TestAllCooledTrialRunsWhenRoundEndsInAnotherCredentials429(t *testing.T) {
+	f := newAllCooledFixture(t, nil, internalconfig.QuotaReconcileClear, "claude-a", "claude-b", "claude-c")
+	f.manager.SetRetryConfig(2, 0, 0)
+	f.cool(t, "claude-b")
+	f.executor.lift("claude-a")
+	f.executor.lift("claude-b")
+	f.executor.mu.Lock()
+	f.executor.transient = map[string]int{"claude-a": 1}
+	f.executor.mu.Unlock()
+
+	resp, err := f.execute(cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("Execute error = %v, want the trial on claude-b served", err)
+	}
+	if string(resp.Payload) != `{"served_by":"claude-b"}` {
+		t.Fatalf("payload = %s, want served by claude-b", resp.Payload)
+	}
+	if f.executor.callCount("claude-c") != 1 {
+		t.Fatalf("claude-c called %d times, want once (its fresh 429 ends the round)", f.executor.callCount("claude-c"))
+	}
+}
+
 func TestAllCooledTrialNoneLiftReturnsTodaysErrorAndHonoursGap(t *testing.T) {
 	f := newAllCooledFixture(t, nil, internalconfig.QuotaReconcileClear, "claude-a", "claude-b")
 	f.cool(t, "claude-a")
