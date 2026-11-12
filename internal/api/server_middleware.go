@@ -357,6 +357,34 @@ func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 	}
 }
 
+// SetAPIReady opens or closes the proxy API routes. While closed they answer a
+// retryable 503 instead of routing against a model registry that is still being
+// filled, which would reject known models as unknown. Health, management and
+// OAuth routes are not affected. A new server starts open.
+func (s *Server) SetAPIReady(ready bool) {
+	if s == nil {
+		return
+	}
+	s.apiNotReady.Store(!ready)
+}
+
+func (s *Server) startupReadinessMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if s == nil || !s.apiNotReady.Load() || c == nil || c.Request == nil || c.Request.URL == nil || !isExampleAPIKeySafeModeProxyPath(c.Request.URL.Path) {
+			c.Next()
+			return
+		}
+		closeUnconsumedRequestOnAbort(c)
+		c.Header("Retry-After", "1")
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+			"error": gin.H{
+				"type":    "server_starting",
+				"message": "Server is starting and has not finished loading credentials; retry shortly.",
+			},
+		})
+	}
+}
+
 func (s *Server) exampleAPIKeySafeModeRequired(cfg *config.Config) bool {
 	return s != nil && s.exampleAPIKeySafeModeEnabled && cfg != nil && safemode.HasExampleAPIKeys(cfg.APIKeys)
 }

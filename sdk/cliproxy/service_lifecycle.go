@@ -138,6 +138,11 @@ func (s *Service) Run(ctx context.Context) error {
 
 	// handlers no longer depend on legacy clients; pass nil slice initially
 	s.server = api.NewServer(cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
+	if !homeEnabled {
+		// Stored credentials have no models registered until the initial load below;
+		// answer API traffic with a retryable 503 until then instead of a 400.
+		s.server.SetAPIReady(false)
+	}
 	s.syncPluginRuntimeConfig(ctx)
 	if homeEnabled {
 		s.configRuntimeMu.Lock()
@@ -232,6 +237,10 @@ func (s *Service) Run(ctx context.Context) error {
 		s.configRuntimeMu.Lock()
 		s.syncPluginModelRuntime(ctx)
 		s.configRuntimeMu.Unlock()
+		// The watcher ran the initial auth load and syncPluginModelRuntime registered
+		// models for every loaded credential.
+		s.server.SetAPIReady(true)
+		log.Info("initial auth load complete, API routes ready")
 	}
 
 	s.registerModelRefreshCallback()
