@@ -138,31 +138,11 @@ func (m *Manager) recheckQuotaCooldown(ctx context.Context, adapter QuotaRecheck
 	identity := newQuotaCooldownIdentity(auth)
 	verdict, err := m.quotaRecheckVerdict(ctx, adapter, auth)
 	if err != nil {
-		if mode == internalconfig.QuotaReconcileObserve {
-			log.WithFields(log.Fields{
-				"provider":    strings.ToLower(strings.TrimSpace(auth.Provider)),
-				"auth_id":     auth.ID,
-				"verdict":     QuotaVerdictUnknown.String(),
-				"reason":      err.Error(),
-				"cooldown_to": auth.Quota.NextRecoverAt,
-			}).Info("quota recheck: observed verdict, cooldown kept (observe mode)")
-			return false
-		}
-		log.Debugf("quota reconcile: probe failed for %s: %v", auth.ID, err)
-		return false
-	}
-	if mode == internalconfig.QuotaReconcileObserve {
-		log.WithFields(log.Fields{
-			"provider":    strings.ToLower(strings.TrimSpace(auth.Provider)),
-			"auth_id":     auth.ID,
-			"verdict":     verdict.State.String(),
-			"source":      verdict.Source,
-			"signals":     summarizeQuotaSignals(verdict.Signals),
-			"cooldown_to": auth.Quota.NextRecoverAt,
-		}).Info("quota recheck: observed verdict, cooldown kept (observe mode)")
+		logQuotaRecheckKept(auth, mode, QuotaVerdict{State: QuotaVerdictUnknown}, err.Error(), m.quotaCooldownKeptUntil(auth))
 		return false
 	}
 	if mode != internalconfig.QuotaReconcileClear || verdict.State != QuotaVerdictAllowed {
+		logQuotaRecheckKept(auth, mode, verdict, "", m.quotaCooldownKeptUntil(auth))
 		return false
 	}
 	_, _, errReset := m.resetQuota(ctx, auth.ID, func(current *Auth) bool {
@@ -179,6 +159,44 @@ func (m *Manager) recheckQuotaCooldown(ctx context.Context, adapter QuotaRecheck
 	schedule.noteCleared(auth.ID, schedule.now())
 	log.Infof("quota reconcile: provider reports usage allowed, cleared stale quota cooldown for %s", auth.ID)
 	return true
+}
+
+// logQuotaRecheckKept records a verdict that leaves the cooldown in place, so
+// every recheck shows in the log and not only the ones that clear. The verdict,
+// deadline and signals go in the message because the log formatter prints only
+// a fixed set of fields.
+func logQuotaRecheckKept(auth *Auth, mode internalconfig.QuotaReconcileMode, verdict QuotaVerdict, reason string, keptUntil time.Time) {
+	until := "unknown"
+	if !keptUntil.IsZero() {
+		until = keptUntil.UTC().Format(time.RFC3339)
+	}
+	msg := fmt.Sprintf("quota recheck: verdict=%s, cooldown kept until %s", verdict.State, until)
+	if verdict.Source != "" {
+		msg += " source=" + verdict.Source
+	}
+	if signals := summarizeQuotaSignals(verdict.Signals); signals != "" {
+		msg += " signals=[" + signals + "]"
+	}
+	fields := log.Fields{
+		"provider": strings.ToLower(strings.TrimSpace(auth.Provider)),
+		"auth_id":  auth.ID,
+		"mode":     string(mode),
+	}
+	if reason != "" {
+		fields["reason"] = reason
+	}
+	log.WithFields(fields).Info(msg)
+}
+
+// quotaCooldownKeptUntil returns the soonest live quota reset of auth as stored
+// now: a probe that hit a 429 may have refreshed it, and a model-only cooldown
+// has no credential-level deadline.
+func (m *Manager) quotaCooldownKeptUntil(auth *Auth) time.Time {
+	current, ok := m.GetByID(auth.ID)
+	if !ok || current == nil {
+		current = auth
+	}
+	return soonestKnownReset(current, m.quotaReconcile.schedule.now())
 }
 
 // quotaUsageSnapshotChanged polls the adapter's advisory usage snapshot on its
