@@ -186,12 +186,18 @@ func claudeCooldownRejectedWindows(auth *Auth, now time.Time) (windows []string,
 			}
 		}
 	}
-	if claudeCredentialCooldownLive(auth, now) {
+	credentialLive := claudeCredentialCooldownLive(auth, now)
+	if credentialLive {
 		ok = true
 		collect(auth.Quota.cooldownSignals)
 	}
 	for _, state := range auth.ModelStates {
-		if state != nil && state.Quota.Exceeded && state.Quota.NextRecoverAt.After(now) && hasRejectedClaudeUnifiedSignals(state.Quota.cooldownSignals) {
+		// A model quota that ends inside a live credential quota sets no
+		// cooldown of its own.
+		if state == nil || (credentialLive && state.Quota.NextRecoverAt.Before(auth.Quota.NextRecoverAt)) {
+			continue
+		}
+		if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(now) && hasRejectedClaudeUnifiedSignals(state.Quota.cooldownSignals) {
 			ok = true
 			collect(state.Quota.cooldownSignals)
 		}

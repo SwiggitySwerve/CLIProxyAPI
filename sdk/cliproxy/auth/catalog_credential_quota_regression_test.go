@@ -40,19 +40,12 @@ func TestCredentialQuotaKeepsHealthyCatalogAcrossRestart(t *testing.T) {
 		listed[id] = true
 	}
 	for _, model := range models {
-		state := oauth.ModelStates[model.ID]
-		if state == nil || !state.Quota.Exceeded {
-			t.Fatalf("expected model %s to have Quota.Exceeded = true", model.ID)
+		blocked, reason, next := isAuthBlockedForModel(oauth, model.ID, time.Now())
+		if !blocked || reason != blockReasonCooldown || next.Before(time.Now().Add(retry-time.Minute)) {
+			t.Fatalf("model %s on the quota credential: blocked=%v reason=%v until %v, want the 3h credential quota", model.ID, blocked, reason, next)
 		}
-		expectedReason := "credential_quota"
-		if model.ID == "audit-sol" {
-			expectedReason = "quota"
-		}
-		if state.Quota.Reason != expectedReason {
-			t.Fatalf("model %s: got Quota.Reason = %q, want %q", model.ID, state.Quota.Reason, expectedReason)
-		}
-		t.Logf("model=%s OAuth_reason=%s quota_exceeded=%v healthy_provider_blocked=%v listed=%v",
-			model.ID, state.Quota.Reason, state.Quota.Exceeded, false, listed[model.ID])
+		t.Logf("model=%s OAuth_blocked_until=%s healthy_provider_blocked=%v listed=%v",
+			model.ID, next.Format(time.RFC3339), false, listed[model.ID])
 		wantListed := true
 		if listed[model.ID] != wantListed {
 			t.Errorf("healthy catalog lost %s: listed=%v, want %v", model.ID, listed[model.ID], wantListed)

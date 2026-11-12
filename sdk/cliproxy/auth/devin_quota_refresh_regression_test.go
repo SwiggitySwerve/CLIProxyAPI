@@ -46,10 +46,15 @@ func devinExhaustedAuth(t *testing.T, m *Manager, id, model, sibling string, rec
 			"weekly_quota_remaining_percent": "0%",
 		},
 	}
+	// The model states are the credential-derived copies an older build wrote
+	// (and a legacy cooldown restore can still bring back): the reporting
+	// model's "quota" block carrying Devin's exhaustion error, and a sibling's
+	// "credential_quota" label.
 	stored.ModelStates = map[string]*ModelState{
 		model: {
 			Status: StatusError, Unavailable: true, NextRetryAfter: recoverAt,
-			Quota: QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: recoverAt},
+			Quota:     QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: recoverAt},
+			LastError: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "failed_precondition: Your weekly usage quota has been exhausted."},
 		},
 		sibling: {
 			Status: StatusError, Unavailable: true, NextRetryAfter: recoverAt,
@@ -574,17 +579,6 @@ func TestDevinRefresh_OwnFailureUnderLongQuotaKeepsOwnDeadline(t *testing.T) {
 	}
 }
 
-func TestDevinClearCooldown_ClearsIndependentShadow(t *testing.T) {
-	st := &ModelState{Unavailable: true, NextRetryAfter: time.Now().Add(time.Hour)}
-	st.credentialQuotaShadow = &ModelState{Unavailable: true}
-	st.credentialQuotaPropagated = true
-	authFixture := &Auth{ID: "x", Provider: "devin", Unavailable: true, NextRetryAfter: time.Now().Add(time.Hour), ModelStates: map[string]*ModelState{"m": st}}
-	clearCooldownStateForAuth(authFixture, time.Now())
-	if st.credentialQuotaShadow != nil || st.credentialQuotaPropagated {
-		t.Fatal("deliberate cooldown clear must drop the independent shadow and wrap marker")
-	}
-}
-
 func TestDevinRestoredIndependent_KeepsStaleSuccessWatermark(t *testing.T) {
 	withQuotaCooldownEnabled(t)
 	m, auth, model, sibling := devinRefreshAuthFixture(t, "devin-watermark-6690")
@@ -755,22 +749,30 @@ func TestDevinRefresh_AlternatingAfterReloadFullyReleases(t *testing.T) {
 	}
 }
 
+// requireModelBlockedBetween checks that model is blocked by its own state
+// until a deadline in (min, max) from now.
+func requireModelBlockedBetween(t *testing.T, m *Manager, authID, model string, min, max time.Duration) {
+	t.Helper()
+	stored, _ := m.GetByID(authID)
+	state := stored.ModelStates[model]
+	if state == nil {
+		t.Fatalf("%s has no state", model)
+	}
+	now := time.Now()
+	if blocked, _, next := isAuthBlockedForModel(stored, model, now); !blocked || next.Before(now.Add(min)) || next.After(now.Add(max)) {
+		t.Fatalf("%s blocked=%v until %v, want blocked for between %v and %v", model, blocked, next, min, max)
+	}
+}
+
 func TestDevinRestoreDoesNotClobberNewerShadow(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	auth := &Auth{ID: "devin-restore-shadow-6690", Provider: "devin", Status: StatusActive}
 	if _, err := m.Register(context.Background(), auth); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	// Live state already carries a newer independent shadow.
+	// The live state holds the model's own newer 12h block.
 	live, _ := m.GetByID(auth.ID)
-	newShadow := &ModelState{Unavailable: true, Status: StatusError, NextRetryAfter: time.Now().Add(12 * time.Hour), UpdatedAt: time.Now()}
-	liveState := &ModelState{
-		Unavailable: true, Status: StatusError, NextRetryAfter: time.Now().Add(72 * time.Hour),
-		Quota:     QuotaState{Exceeded: true, Reason: "credential_quota", NextRecoverAt: time.Now().Add(72 * time.Hour)},
-		UpdatedAt: time.Now(),
-	}
-	liveState.credentialQuotaShadow = newShadow
-	liveState.credentialQuotaPropagated = true
+	liveState := &ModelState{Unavailable: true, Status: StatusError, NextRetryAfter: time.Now().Add(12 * time.Hour), UpdatedAt: time.Now()}
 	live.ModelStates = map[string]*ModelState{"claude-opus-5-5": liveState}
 	if _, err := m.Update(context.Background(), live); err != nil {
 		t.Fatalf("seed live: %v", err)
@@ -787,11 +789,9 @@ func TestDevinRestoreDoesNotClobberNewerShadow(t *testing.T) {
 	m.restoreCooldownRecordLocked(record, time.Now())
 	m.mu.Unlock()
 
-	stored, _ := m.GetByID(auth.ID)
-	got := stored.ModelStates["claude-opus-5-5"].credentialQuotaShadow
-	if got == nil || !got.NextRetryAfter.After(time.Now().Add(6*time.Hour)) {
-		t.Fatalf("newer live shadow clobbered by stale record, shadow=%+v", got)
-	}
+	// The older record's own block is shorter and its propagated 72h copy is
+	// not restored: the live 12h block stands.
+	requireModelBlockedBetween(t, m, auth.ID, "claude-opus-5-5", 6*time.Hour, 24*time.Hour)
 }
 
 func TestCooldownRecord_IndependentStateJSONRoundTrip(t *testing.T) {
@@ -1044,14 +1044,9 @@ func TestDevinRestorePreservesLiveUnwrappedIndependent(t *testing.T) {
 	m.restoreCooldownRecordLocked(staleRecord, time.Now())
 	m.mu.Unlock()
 
-	stored, _ := m.GetByID(auth.ID)
-	restored := stored.ModelStates["claude-opus-5-5"]
-	if restored.credentialQuotaShadow == nil {
-		t.Fatal("live unwrapped independent cooldown must be captured as the shadow when a wrapped record applies")
-	}
-	if got := restored.credentialQuotaShadow.NextRetryAfter; got.After(time.Now().Add(24*time.Hour)) || got.Before(time.Now().Add(6*time.Hour)) {
-		t.Fatalf("captured shadow deadline = %v, want the ~12h independent block", got)
-	}
+	// A wrapped record with no own layer restores nothing for the model: the
+	// live 12h block stands and the 72h propagated copy is not applied.
+	requireModelBlockedBetween(t, m, auth.ID, "claude-opus-5-5", 6*time.Hour, 24*time.Hour)
 }
 
 func TestDevinRestoreDoesNotCaptureCredentialDerivedLegacyQuota(t *testing.T) {
@@ -1087,10 +1082,8 @@ func TestDevinRestoreDoesNotCaptureCredentialDerivedLegacyQuota(t *testing.T) {
 	m.restoreCooldownRecordLocked(wrappedRecord, time.Now())
 	m.mu.Unlock()
 
-	stored, _ := m.GetByID(auth.ID)
-	if got := stored.ModelStates["claude-opus-5-5"].credentialQuotaShadow; got != nil {
-		t.Fatalf("credential-derived legacy quota must not be captured as independence, shadow=%+v", got)
-	}
+	// The wrapped record adds no 72h block to the model.
+	requireModelBlockedBetween(t, m, auth.ID, "claude-opus-5-5", time.Minute, 10*time.Minute)
 }
 
 func TestDevinRestoreIndependentRecordUnderLiveWrapPreserved(t *testing.T) {

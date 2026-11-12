@@ -263,8 +263,13 @@ func (s *quotaRecheckSchedule) noteQuotaRejection(id string) {
 }
 
 // soonestKnownReset returns the earliest future recovery time among the
-// credential's quota cooldowns, or zero when none is known.
+// credential's quota cooldowns, or zero when none is known. A live credential
+// quota holds every model at least until it ends, so a model's shorter quota
+// cannot reset sooner.
 func soonestKnownReset(auth *Auth, now time.Time) time.Time {
+	if claudeCredentialCooldownLive(auth, now) {
+		return auth.Quota.NextRecoverAt
+	}
 	var soonest time.Time
 	consider := func(q QuotaState) {
 		if q.Exceeded && q.NextRecoverAt.After(now) && (soonest.IsZero() || q.NextRecoverAt.Before(soonest)) {

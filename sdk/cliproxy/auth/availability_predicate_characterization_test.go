@@ -60,12 +60,12 @@ func charModelQuotaState(now, until time.Time) *ModelState {
 	}
 }
 
-// charCredentialQuotaState is the shape a credential-scoped 429 propagates to
-// every model state.
+// charCredentialQuotaState is the shape an older build copied from a
+// credential-scoped 429 into every model state (a legacy restore can still
+// hold it).
 func charCredentialQuotaState(now, until time.Time) *ModelState {
 	state := charModelQuotaState(now, until)
 	state.Quota.Reason = "credential_quota"
-	state.credentialQuotaPropagated = true
 	return state
 }
 
