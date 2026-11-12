@@ -5,35 +5,12 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 )
-
-// resultRecorderHook collects every Result the manager records.
-type resultRecorderHook struct {
-	mu      sync.Mutex
-	results []Result
-}
-
-func (*resultRecorderHook) OnAuthRegistered(context.Context, *Auth) {}
-
-func (*resultRecorderHook) OnAuthUpdated(context.Context, *Auth) {}
-
-func (h *resultRecorderHook) OnResult(_ context.Context, result Result) {
-	h.mu.Lock()
-	h.results = append(h.results, result)
-	h.mu.Unlock()
-}
-
-func (h *resultRecorderHook) recorded() []Result {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return append([]Result(nil), h.results...)
-}
 
 // TestExecutionNeverRecordsModelLessResult pins that no Execute, ExecuteStream or ExecuteCount
 // path records a failed Result without a model. The model-less branch of MarkResult has no
@@ -45,19 +22,35 @@ func TestExecutionNeverRecordsModelLessResult(t *testing.T) {
 	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
 
 	type pathCase struct {
-		name string
-		run  func(m *Manager, provider, model string) error
+		name      string
+		midStream bool // the executor returns a stream that fails after its first payload
+		run       func(m *Manager, provider, model string) error
 	}
 	paths := []pathCase{
-		{"Execute", func(m *Manager, provider, model string) error {
+		{"Execute", false, func(m *Manager, provider, model string) error {
 			_, err := m.Execute(context.Background(), []string{provider}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
 			return err
 		}},
-		{"ExecuteStream", func(m *Manager, provider, model string) error {
+		{"ExecuteStream", false, func(m *Manager, provider, model string) error {
 			_, err := m.ExecuteStream(context.Background(), []string{provider}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
 			return err
 		}},
-		{"ExecuteCount", func(m *Manager, provider, model string) error {
+		{"ExecuteStreamMidStream", true, func(m *Manager, provider, model string) error {
+			stream, err := m.ExecuteStream(context.Background(), []string{provider}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+			if err != nil {
+				return err
+			}
+			// The wrapper records the failure before it forwards the error chunk and closes
+			// the channel, so draining to closure makes the assertion deterministic.
+			var chunkErr error
+			for chunk := range stream.Chunks {
+				if chunk.Err != nil {
+					chunkErr = chunk.Err
+				}
+			}
+			return chunkErr
+		}},
+		{"ExecuteCount", false, func(m *Manager, provider, model string) error {
 			_, err := m.ExecuteCount(context.Background(), []string{provider}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
 			return err
 		}},
@@ -71,7 +64,7 @@ func TestExecutionNeverRecordsModelLessResult(t *testing.T) {
 				provider, status, path, id := provider, status, path, fmt.Sprintf("auth-modelless-pin-%d", n)
 				t.Run(fmt.Sprintf("%s/%s/%d", provider, path.name, status), func(t *testing.T) {
 					model := "modelless-pin-model"
-					hook := &resultRecorderHook{}
+					hook := &resultCaptureHook{}
 					m := NewManager(nil, nil, hook)
 					failing := func(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 						return cliproxyexecutor.Response{}, customStatusError{code: status, msg: "upstream refused"}
@@ -83,7 +76,14 @@ func TestExecutionNeverRecordsModelLessResult(t *testing.T) {
 							countFn:   failing,
 						},
 						streamFn: func(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
-							return nil, customStatusError{code: status, msg: "upstream refused"}
+							if !path.midStream {
+								return nil, customStatusError{code: status, msg: "upstream refused"}
+							}
+							chunks := make(chan cliproxyexecutor.StreamChunk, 2)
+							chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.output_item.added"}`)}
+							chunks <- cliproxyexecutor.StreamChunk{Err: customStatusError{code: status, msg: "upstream refused"}}
+							close(chunks)
+							return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
 						},
 					})
 					reg := registry.GetGlobalRegistry()
@@ -97,9 +97,13 @@ func TestExecutionNeverRecordsModelLessResult(t *testing.T) {
 						t.Fatal("expected the executor failure to surface")
 					}
 
-					results := hook.recorded()
-					if len(results) == 0 {
-						t.Fatal("no Result was recorded; the pin would be vacuous")
+					results := hook.Results()
+					failed := false
+					for _, result := range results {
+						failed = failed || !result.Success
+					}
+					if !failed {
+						t.Fatal("no failed Result was recorded; the pin would be vacuous")
 					}
 					for i, result := range results {
 						if result.Model == "" && result.RouteModel == "" {
