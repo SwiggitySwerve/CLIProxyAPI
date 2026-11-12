@@ -3,14 +3,18 @@
 Run: python3 -m unittest deploy/local/sidecars/exporter/test_exporter.py
 """
 import json
+import math
+import time
+from unittest.mock import patch
 import os
 import subprocess
 import sys
+import socket
 import tempfile
 import threading
 import unittest
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 
 SCRIPT = Path(__file__).with_name("cli-proxy-exporter")
@@ -30,6 +34,29 @@ CREDS = [
 ]
 
 
+_network_violations = []
+_network_guard = None
+_original_connect = socket.socket.connect
+
+
+def setUpModule():
+    global _network_guard
+    def connect(sock, address):
+        if isinstance(address, tuple) and address[1] in {18317, 18320, 8317, 8319}:
+            _network_violations.append(address)
+            raise AssertionError(f"test attempted a live service port: {address}")
+        return _original_connect(sock, address)
+    _network_guard = patch.object(socket.socket, 'connect', connect)
+    _network_guard.start()
+
+
+def tearDownModule():
+    _network_guard.stop()
+    # http_ok catches exceptions; retain attempted ports so a swallowed assertion still fails.
+    if _network_violations:
+        raise AssertionError(f"tests attempted live service ports: {_network_violations}")
+
+
 class Stub(BaseHTTPRequestHandler):
     def do_GET(self):
         body = json.dumps({"files": CREDS}).encode() if self.path.endswith("/credentials") else b"ok"
@@ -46,7 +73,7 @@ class ExporterProxyTruth(unittest.TestCase):
     def test_cooling_credential_reports_the_proxys_deadline(self):
         srv = HTTPServer(("127.0.0.1", 0), Stub)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir="/dev/shm") as tmp:
             tmp = Path(tmp)
             (tmp / ".config/cli-proxy-rerank").mkdir(parents=True)
             (tmp / ".config/cli-proxy-rerank/management-key").write_text("test-key\n")
@@ -54,9 +81,15 @@ class ExporterProxyTruth(unittest.TestCase):
             instances.write_text(json.dumps({"instances": [{
                 "id": "stub", "provider": "claude", "base_url": f"http://127.0.0.1:{srv.server_port}",
                 "management_path": "/m"}]}))
-            env = dict(os.environ, HOME=str(tmp), CLI_PROXY_INSTANCES=str(instances))
-            out = subprocess.run([str(SCRIPT), "--once"], env=env, check=True, capture_output=True, text=True).stdout
+            mod = load_exporter(tmp)
+            mod.DASHBOARD = f"http://127.0.0.1:{srv.server_port}"
+            mod.PROXIES = {"claude": (f"http://127.0.0.1:{srv.server_port}",
+                                       f"http://127.0.0.1:{srv.server_port}/m", "stub")}
+            with patch.object(mod, 'fetch_usage', return_value=(True, json.dumps(health_payload()).encode())), \
+                 patch.object(mod, 'collect_usage'), patch.object(mod, 'collect_quota'), patch.object(mod, 'collect_plans'):
+                out = mod.render()
         srv.shutdown()
+        srv.server_close()
         lines = out.splitlines()
 
         def value(prefix):
@@ -79,10 +112,6 @@ class ExporterProxyTruth(unittest.TestCase):
         self.assertGreater(value(f"cliproxy_credential_quota_age_seconds{{{lab}\"idle\",model=\"all\"}}"), 3600)
         self.assertFalse([l for l in lines if l.startswith("cliproxy_credential_") and "@" in l
                           and not l.startswith("cliproxy_credential_info")])
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 def load_exporter(home: Path):
@@ -150,7 +179,7 @@ class ExporterUsageCounters(unittest.TestCase):
 
     def setUp(self):
         import sqlite3
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = tempfile.TemporaryDirectory(dir="/dev/shm")
         home = Path(self.tmp.name)
         db_path = home / ".local/share/cpa-manager-plus/usage.sqlite"
         db_path.parent.mkdir(parents=True)
@@ -205,3 +234,82 @@ class ExporterUsageCounters(unittest.TestCase):
         cost = lambda out: sum(v for s, v in out.items() if s.startswith("cliproxy_api_equivalent_cost_usd_total{"))
         self.assertLess(cost(after), cost(before))
         self.assertEqual(cost(after), cost(self.scrape(load_exporter(self.home))))
+
+
+def health_payload():
+    return {"schema_version": 1, "rate_book_loaded": False, "client_aliases_loaded": False,
+            "sources": [
+                {"instance": "claude-primary", "subscribed": True, "last_event_age_seconds": 1.5},
+                {"instance": "codex-primary", "subscribed": False, "last_event_age_seconds": None}]}
+
+
+class ExporterUsageHealth(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(dir="/dev/shm")
+        self.mod = load_exporter(Path(self.tmp.name))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_adds_only_health_and_ignores_counter_configuration_readiness(self):
+        m = self.mod.Metrics()
+        with patch.object(self.mod, 'http_ok', return_value=(True, json.dumps(health_payload()).encode())) as get:
+            self.mod.collect_usage_health(m)
+            self.mod.fetch_usage(m)
+        get.assert_called_once_with('http://127.0.0.1:18320/v1/exporter', {'Authorization': 'Bearer test-key'}, timeout=4)
+        values = {line[0]: line[1] for line in m.lines if isinstance(line, list)}
+        self.assertEqual(set(values), {
+            'cliproxy_up{service="usage"}',
+            'cliproxy_usage_source_subscribed{instance="claude-primary"}',
+            'cliproxy_usage_source_subscribed{instance="codex-primary"}',
+            'cliproxy_usage_source_last_event_age_seconds{instance="claude-primary"}',
+            'cliproxy_usage_source_last_event_age_seconds{instance="codex-primary"}'})
+        self.assertEqual(values['cliproxy_up{service="usage"}'], 1)
+        self.assertEqual(values['cliproxy_usage_source_subscribed{instance="claude-primary"}'], 1)
+        self.assertEqual(values['cliproxy_usage_source_subscribed{instance="codex-primary"}'], 0)
+        self.assertEqual(values['cliproxy_usage_source_last_event_age_seconds{instance="claude-primary"}'], 1.5)
+        self.assertTrue(math.isnan(values['cliproxy_usage_source_last_event_age_seconds{instance="codex-primary"}']))
+        self.assertIn(' NaN', m.text())
+
+    def test_slow_usage_read_has_one_deadline_and_other_collectors_still_render(self):
+        release = threading.Event()
+        seen = []
+        class Slow(BaseHTTPRequestHandler):
+            def do_GET(handler):
+                seen.append((handler.path, handler.headers.get('Authorization')))
+                release.wait(10)
+                try:
+                    handler.send_response(200); handler.end_headers(); handler.wfile.write(b'{}')
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+            def log_message(self, *args):
+                pass
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Slow)
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        self.mod.USAGE = f'http://127.0.0.1:{server.server_port}'
+        self.mod.PROXIES = {}
+        calls = []
+        try:
+            with patch.object(self.mod, 'collect_usage', side_effect=lambda m: calls.append('usage')), \
+                 patch.object(self.mod, 'collect_quota', side_effect=lambda m: calls.append('quota')), \
+                 patch.object(self.mod, 'collect_credentials', side_effect=lambda m: calls.append('credentials')), \
+                 patch.object(self.mod, 'collect_plans', side_effect=lambda m: calls.append('plans')):
+                # Dashboard stays on its original probe; intercept only that request.
+                original = self.mod.http_ok
+                def get(url, *args, **kwargs):
+                    if url.startswith(self.mod.DASHBOARD):
+                        return False, b''
+                    return original(url, *args, **kwargs)
+                with patch.object(self.mod, 'http_ok', side_effect=get), patch('sys.stderr'):
+                    start = time.monotonic(); text = self.mod.render(); elapsed = time.monotonic()-start
+            self.assertLess(elapsed, 4.8)
+            self.assertIn('cliproxy_up{service="usage"} 0', text)
+            self.assertEqual(calls, ['usage', 'quota', 'credentials', 'plans'])
+            self.assertEqual(seen, [('/v1/exporter', 'Bearer test-key')])
+            self.assertNotIn('test-key', seen[0][0])
+        finally:
+            release.set(); server.shutdown(); server.server_close(); thread.join()
+
+
+if __name__ == "__main__":
+    unittest.main()

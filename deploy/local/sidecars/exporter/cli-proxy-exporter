@@ -18,6 +18,7 @@ Prometheus can scrape it. Labels hold account emails; this endpoint is only
 reachable from the host and the cluster.
 """
 import json
+import math
 import os
 import re
 import sqlite3
@@ -46,6 +47,9 @@ BUILTIN_INSTANCES = [
 # ("host:port,host:port") overrides the file; loopback only when neither is set.
 EXPORTER_FILE = Path(os.environ.get("CLI_PROXY_EXPORTER_CONFIG") or HOME / ".config/cli-proxy/exporter.json")
 DASHBOARD = "http://127.0.0.1:18317"
+USAGE = "http://127.0.0.1:18320"
+USAGE_DEADLINE_SECONDS = 4
+_usage_http_gate = threading.Semaphore(1)
 # Anthropic reports some limits under internal codenames; same labels as the dashboard.
 CLAUDE_WINDOW_NAMES = {"iguana_necktie": "Fable weekly", "seven_day": "Weekly", "five_hour": "5-hour"}
 
@@ -88,6 +92,7 @@ class Metrics:
         self.series = {}  # series -> its [series, value] pair, so repeats are summed
         self.declared = set()
         self.now = time.time()  # one clock for the whole scrape
+        self.usage_response = None  # at most one bounded Prox request per scrape
         self.creds = None  # GET /credentials result, fetched once per scrape
 
     def add(self, name, kind, help_text, value, **labels):
@@ -105,7 +110,7 @@ class Metrics:
 
     def text(self):
         # Full precision: counters reach 1e9+ tokens, and 6 significant digits hid small increments.
-        return "\n".join(l if isinstance(l, str) else f"{l[0]} {l[1]:.17g}" for l in self.lines) + "\n"
+        return "\n".join(l if isinstance(l, str) else f"{l[0]} {'NaN' if math.isnan(l[1]) else format(l[1], '.17g')}" for l in self.lines) + "\n"
 
 
 def http_ok(url, headers=None, timeout=5):
@@ -115,6 +120,56 @@ def http_ok(url, headers=None, timeout=5):
             return 200 <= resp.status < 400, resp.read()
     except Exception:
         return False, b""
+
+
+def fetch_usage(m: Metrics):
+    """One absolute four-second budget, including headers/body, with bounded outstanding work."""
+    if m.usage_response is not None:
+        return m.usage_response
+    if not _usage_http_gate.acquire(blocking=False):
+        m.usage_response = (False, b"")
+        return m.usage_response
+    done = threading.Event()
+    result = [(False, b"")]
+
+    def read():
+        try:
+            result[0] = http_ok(f"{USAGE}/v1/exporter", {"Authorization": f"Bearer {MGMT_KEY}"},
+                                timeout=USAGE_DEADLINE_SECONDS)
+        finally:
+            done.set()
+            _usage_http_gate.release()
+
+    # A server trickling bytes cannot keep the scrape open, or create an unbounded queue
+    # of requests. A late result belongs only to this scrape and is never reused.
+    threading.Thread(target=read, daemon=True).start()
+    m.usage_response = result[0] if done.wait(USAGE_DEADLINE_SECONDS) else (False, b"")
+    return m.usage_response
+
+
+def collect_usage_health(m: Metrics):
+    ok, body = fetch_usage(m)
+    m.add("cliproxy_up", "gauge", "Service reachable.", int(ok), service="usage")
+    if not ok:
+        raise RuntimeError("prox-usage health unavailable")
+    data = json.loads(body)
+    if data["schema_version"] != 1 or not isinstance(data["sources"], list):
+        raise ValueError("invalid prox-usage source health")
+    samples = []
+    for source in data["sources"]:
+        if not isinstance(source["instance"], str) or not isinstance(source["subscribed"], bool):
+            raise ValueError("invalid prox-usage subscription state")
+        age = source["last_event_age_seconds"]
+        if age is not None and (isinstance(age, bool) or not isinstance(age, (int, float)) or
+                                not math.isfinite(age) or age < 0):
+            raise ValueError("invalid prox-usage event age")
+        samples.append((source["instance"], source["subscribed"], age))
+    for instance, subscribed, age in samples:
+        m.add("cliproxy_usage_source_subscribed", "gauge", "1 when the usage source is subscribed.",
+              int(subscribed), instance=instance)
+        m.add("cliproxy_usage_source_last_event_age_seconds", "gauge",
+              "Seconds since this collector received an event; NaN until first event.",
+              math.nan if age is None else age, instance=instance)
 
 
 def load_prices(db):
@@ -454,6 +509,10 @@ def render() -> str:
         up_proxy, _ = http_ok(f"{base}/healthz")
         m.add("cliproxy_up", "gauge", "Service reachable.", 1 if up_proxy else 0, service="proxy", proxy=name)
     m.add("cliproxy_up", "gauge", "Service reachable.", 1 if up_dash else 0, service="dashboard")
+    try:
+        collect_usage_health(m)
+    except Exception:
+        print("prox-usage health unavailable", file=sys.stderr)
     for name, fn in (("usage", collect_usage), ("quota", collect_quota), ("credentials", collect_credentials), ("plans", collect_plans)):
         start = time.time()
         try:
