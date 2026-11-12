@@ -35,6 +35,8 @@ func CooldownSnapshotForAuth(auth *Auth, now time.Time) []CooldownView {
 		if blocked, _, next := availabilityBlock(auth.Unavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now); blocked && next.After(now) {
 			views = append(views, newCooldownView("credential", "", next, now, auth.Quota, auth.StatusMessage, auth.LastError))
 		}
+	} else if until, _, ok := liveCredentialCooldown(auth, now); ok {
+		views = append(views, newCooldownView("credential", "", until, now, auth.Quota, auth.StatusMessage, auth.LastError))
 	}
 
 	// Sorting source keys makes ties deterministic after selector precedence.

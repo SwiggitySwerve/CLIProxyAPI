@@ -201,19 +201,43 @@ func availabilityCharacterizationRows() []availabilityCharacterizationRow {
 					a.NextRetryAfter = until
 					a.Quota = QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: until}
 					a.credentialCooldownUntil = until
-					a.credentialCooldownQuota = true
 					a.ModelStates = map[string]*ModelState{charModel: charHealthyState(now), charOther: charHealthyState(now)}
 				})
 			},
 			want: availabilityAnswers{pick: false, cooled: true, credBlocked: true, listed: false},
 		},
 		{
-			name: "credential cooldown superseded by a rewritten NextRetryAfter, healthy states for M and N",
+			name: "credential cooldown, M's own quota cooldown outlasts it",
 			auth: func(now time.Time) *Auth {
+				until := now.Add(time.Minute)
 				return charAuth(func(a *Auth) {
 					a.Status = StatusError
 					a.Unavailable = true
-					a.NextRetryAfter = now.Add(2 * time.Minute)
+					a.NextRetryAfter = until
+					a.credentialCooldownUntil = until
+					a.ModelStates = map[string]*ModelState{charModel: charModelQuotaState(now, now.Add(10*time.Minute)), charOther: charHealthyState(now)}
+				})
+			},
+			want: availabilityAnswers{pick: false, cooled: true, credBlocked: true, listed: false},
+		},
+		{
+			name: "credential cooldown ending with M's own quota cooldown",
+			auth: func(now time.Time) *Auth {
+				until := now.Add(time.Minute)
+				return charAuth(func(a *Auth) {
+					a.Status = StatusError
+					a.Unavailable = true
+					a.NextRetryAfter = until
+					a.credentialCooldownUntil = until
+					a.ModelStates = map[string]*ModelState{charModel: charModelQuotaState(now, until), charOther: charHealthyState(now)}
+				})
+			},
+			want: availabilityAnswers{pick: false, cooled: true, credBlocked: true, listed: false},
+		},
+		{
+			name: "credential cooldown marker after Unavailable was cleared, healthy states for M and N",
+			auth: func(now time.Time) *Auth {
+				return charAuth(func(a *Auth) {
 					a.credentialCooldownUntil = now.Add(time.Minute)
 					a.ModelStates = map[string]*ModelState{charModel: charHealthyState(now), charOther: charHealthyState(now)}
 				})

@@ -1257,7 +1257,7 @@ func credentialAvailabilityBlock(ctx context.Context, auth *Auth, model string, 
 					return true, blockReasonDisabled, time.Time{}
 				}
 				stateBlocked, stateReason, next := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now)
-				if stateBlocked && next.After(credNext) {
+				if stateBlocked && !next.Before(credNext) {
 					credNext = next
 					if stateReason == blockReasonCooldown {
 						credReason = blockReasonCooldown
@@ -1272,11 +1272,13 @@ func credentialAvailabilityBlock(ctx context.Context, auth *Auth, model string, 
 
 // liveCredentialCooldown reports a still-live credential-wide cooldown that
 // MarkResult recorded for a model-less failure (see credentialCooldownUntil).
+// It is a quota cooldown while the auth-level quota is live, whatever failure
+// came last; the auth-level quota is not a model aggregate while it holds.
 func liveCredentialCooldown(auth *Auth, now time.Time) (time.Time, blockReason, bool) {
-	if auth == nil || !auth.Unavailable || !auth.credentialCooldownUntil.After(now) || !auth.NextRetryAfter.Equal(auth.credentialCooldownUntil) {
+	if auth == nil || !auth.Unavailable || !auth.credentialCooldownUntil.After(now) {
 		return time.Time{}, blockReasonNone, false
 	}
-	if auth.credentialCooldownQuota {
+	if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now) {
 		return auth.credentialCooldownUntil, blockReasonCooldown, true
 	}
 	return auth.credentialCooldownUntil, blockReasonOther, true
@@ -1451,6 +1453,9 @@ func isAuthBlockedByQuotaOrAuthForModelForRequest(ctx context.Context, auth *Aut
 		return true
 	}
 	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && (auth.Quota.NextRecoverAt.IsZero() || auth.Quota.NextRecoverAt.After(now)) {
+		return true
+	}
+	if _, reason, ok := liveCredentialCooldown(auth, now); ok && (reason == blockReasonCooldown || (auth.LastError != nil && shouldRebindSessionAffinityOnError(auth.LastError))) {
 		return true
 	}
 	if model != "" && len(auth.ModelStates) > 0 {

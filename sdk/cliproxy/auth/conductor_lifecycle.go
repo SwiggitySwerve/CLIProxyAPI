@@ -426,7 +426,6 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 			auth.Quota.Signals = observation.Signals
 			auth.cooldownRecordedSeq = existing.cooldownRecordedSeq
 			auth.credentialCooldownUntil = existing.credentialCooldownUntil
-			auth.credentialCooldownQuota = existing.credentialCooldownQuota
 		}
 		if credChanged || mode == updateModeRefresh {
 			applyPreservedRejectedTokens(existing, auth, mode == updateModeRefresh)
@@ -459,17 +458,20 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 					auth.Status = StatusActive
 					cooldownStateChanged = true
 				} else if canServeWithAccessToken && isAuthOrGrantFailure && auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now) {
+					// Only the quota survives the superseded auth failure: a live
+					// credential cooldown is cut back to the credential's quota,
+					// and a model aggregate never becomes one.
+					if _, _, live := liveCredentialCooldown(auth, now); !live {
+						auth.credentialCooldownUntil = time.Time{}
+					} else if auth.credentialCooldownUntil.After(auth.Quota.NextRecoverAt) {
+						auth.credentialCooldownUntil = auth.Quota.NextRecoverAt
+					}
 					auth.Unavailable = true
 					if !auth.NextRetryAfter.After(now) {
 						auth.NextRetryAfter = auth.Quota.NextRecoverAt
 					}
 					auth.LastError = nil
 					auth.StatusMessage = auth.Quota.Reason
-					// Only the quota survives: a credential cooldown left by the
-					// superseded auth failure must not keep blocking every model.
-					if !auth.credentialCooldownQuota {
-						auth.credentialCooldownUntil = time.Time{}
-					}
 					cooldownStateChanged = true
 				}
 				if canServeWithAccessToken {
