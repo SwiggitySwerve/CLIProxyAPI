@@ -2591,9 +2591,11 @@ func serveRegistryTestHomeConnection(conn net.Conn, subscriptionMu *sync.Mutex, 
 }
 
 // serveRegistryTestHomeConnectionWithHeartbeat never sends heartbeat PONGs, so a short
-// heartbeatTimeout fails every lifetime by silence. With closeOnLose the first
-// subscription instead ends when loseFirst closes, independent of the clock.
-func serveRegistryTestHomeConnectionWithHeartbeat(conn net.Conn, heartbeatTimeout string, closeOnLose bool, subscriptionMu *sync.Mutex, subscriptions *int, firstAck chan struct{}, loseFirst chan struct{}, secondSubscribe chan struct{}, secondSubscribeOnce *sync.Once, allowSecondAck chan struct{}, stop chan struct{}) {
+// heartbeatTimeout fails every lifetime by silence. With errorOnLose the first
+// subscription instead ends with a RESP error when loseFirst closes, independent of
+// the clock. An error reply keeps go-redis from resubscribing before the supervisor
+// replaces the lifetime, which a closed connection would trigger.
+func serveRegistryTestHomeConnectionWithHeartbeat(conn net.Conn, heartbeatTimeout string, errorOnLose bool, subscriptionMu *sync.Mutex, subscriptions *int, firstAck chan struct{}, loseFirst chan struct{}, secondSubscribe chan struct{}, secondSubscribeOnce *sync.Once, allowSecondAck chan struct{}, stop chan struct{}) {
 	defer func() { _ = conn.Close() }()
 	reader := bufio.NewReader(conn)
 	for {
@@ -2627,8 +2629,10 @@ func serveRegistryTestHomeConnectionWithHeartbeat(conn net.Conn, heartbeatTimeou
 				close(firstAck)
 				select {
 				case <-loseFirst:
-					if closeOnLose {
-						return
+					if errorOnLose {
+						if _, errWrite := io.WriteString(conn, "-ERR home connection lost\r\n"); errWrite != nil {
+							return
+						}
 					}
 					<-stop
 					return
