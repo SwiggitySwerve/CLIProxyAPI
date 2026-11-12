@@ -1220,7 +1220,11 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	return isAuthBlockedForModelForRequest(nil, auth, model, now)
 }
 
-func isAuthBlockedForModelForRequest(ctx context.Context, auth *Auth, model string, now time.Time, clientHeaders ...http.Header) (bool, blockReason, time.Time) {
+// credentialAvailabilityBlock is the credential-wide part of the availability
+// predicate: the gates that block every model whatever its own state says.
+// model only extends a credential quota's deadline with that model's own
+// longer cooldown.
+func credentialAvailabilityBlock(ctx context.Context, auth *Auth, model string, now time.Time, clientHeaders ...http.Header) (bool, blockReason, time.Time) {
 	if auth == nil {
 		return true, blockReasonOther, time.Time{}
 	}
@@ -1254,6 +1258,17 @@ func isAuthBlockedForModelForRequest(ctx context.Context, auth *Auth, model stri
 			}
 		}
 		return true, blockReasonCooldown, credNext
+	}
+	return false, blockReasonNone, time.Time{}
+}
+
+// isAuthBlockedForModelForRequest is the availability predicate. Selection, the
+// scheduler's model shards, the all-cooled warning and the scheduler's
+// credential-wide resync check (isCredentialBlocked) all read it, so they agree
+// on which credentials can serve model.
+func isAuthBlockedForModelForRequest(ctx context.Context, auth *Auth, model string, now time.Time, clientHeaders ...http.Header) (bool, blockReason, time.Time) {
+	if blocked, reason, next := credentialAvailabilityBlock(ctx, auth, model, now, clientHeaders...); blocked {
+		return true, reason, next
 	}
 	unavailable := codexRefreshUnavailableForRequest(ctx, auth, now, clientHeaders...)
 	if model != "" {
