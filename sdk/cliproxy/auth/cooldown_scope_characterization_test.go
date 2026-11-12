@@ -619,3 +619,32 @@ func TestScopeCharObservationRestoreUnderCredentialQuota(t *testing.T) {
 		requireGate(t, auth, model, time.Now(), start.Add(5*time.Hour))
 	}
 }
+
+// TestScopeCharModelLessFailureKeepsCredentialQuota covers the SDK-only
+// model-less branch (no execution path emits one): a model-less 429 or
+// cloudflare challenge during a live credential quota must not relabel or
+// replace it, so every model stays blocked until the quota ends.
+func TestScopeCharModelLessFailureKeepsCredentialQuota(t *testing.T) {
+	for name, failure := range map[string]Result{
+		"429":        {Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"}},
+		"cloudflare": {Error: &Error{HTTPStatus: http.StatusForbidden, Message: "cloudflare challenge"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newScopeFixture(t, "scope-model-less-"+name)
+			start := time.Now()
+			f.mark(Result{Model: scopeN, Success: true})
+			f.credential429(scopeM, 10*time.Minute)
+			fifteenSeconds := 15 * time.Second
+			failure.RetryAfter = &fifteenSeconds
+			f.mark(failure)
+			auth := f.auth(t)
+			at := time.Now().Add(2 * time.Minute)
+			for _, model := range []string{scopeM, scopeN, scopeR} {
+				requireGate(t, auth, model, at, start.Add(10*time.Minute))
+				if !isAuthBlockedByQuotaOrAuthForModel(auth, model, at) {
+					t.Fatalf("%s: rebind check not blocked at +2m", model)
+				}
+			}
+		})
+	}
+}

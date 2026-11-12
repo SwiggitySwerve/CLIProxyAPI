@@ -3086,6 +3086,10 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	if shouldSkipCredentialCooldown(resultErr) {
 		return
 	}
+	// A live credential quota keeps its class and window: the availability
+	// gate applies it to every model only while it is labelled
+	// credential_quota, and a model-less failure may only extend it.
+	credentialQuotaLive := !disableCooling && auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now)
 	defer func() {
 		if disableCooling && auth.NextRetryAfter.IsZero() && auth.Quota.NextRecoverAt.IsZero() {
 			auth.Unavailable = false
@@ -3117,12 +3121,14 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	} else if isCloudflareChallengeResultError(resultErr) {
 		auth.StatusMessage = "cloudflare challenge"
 		next, backoffLevel := nextCloudflareCooldown(auth.Quota.BackoffLevel, disableCooling, now)
-		applyCooldownFields(&auth.Quota, QuotaState{
-			Exceeded:      true,
-			Reason:        "cloudflare challenge",
-			NextRecoverAt: next,
-			BackoffLevel:  backoffLevel,
-		})
+		if !credentialQuotaLive {
+			applyCooldownFields(&auth.Quota, QuotaState{
+				Exceeded:      true,
+				Reason:        "cloudflare challenge",
+				NextRecoverAt: next,
+				BackoffLevel:  backoffLevel,
+			})
+		}
 		auth.NextRetryAfter = next
 	} else if isInvalidGrantResultError(resultErr) {
 		auth.StatusMessage = "invalid_grant"
@@ -3166,7 +3172,9 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		case 429:
 			auth.StatusMessage = "quota exhausted"
 			auth.Quota.Exceeded = true
-			auth.Quota.Reason = "quota"
+			if !credentialQuotaLive {
+				auth.Quota.Reason = "quota"
+			}
 			var next time.Time
 			if !disableCooling {
 				if retryAfter != nil {
