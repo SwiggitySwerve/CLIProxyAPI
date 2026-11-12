@@ -9,6 +9,7 @@ from unittest.mock import patch
 import os
 import subprocess
 import sys
+import socket
 import tempfile
 import threading
 import unittest
@@ -31,6 +32,29 @@ CREDS = [
      "model_quotas": {"m1": {"observed_at": "2026-01-01T00:00:00Z",
                              "signals": {"Anthropic-Ratelimit-Unified-Status": "rejected"}}}},
 ]
+
+
+_network_violations = []
+_network_guard = None
+_original_connect = socket.socket.connect
+
+
+def setUpModule():
+    global _network_guard
+    def connect(sock, address):
+        if isinstance(address, tuple) and address[1] in {18317, 18320, 8317, 8319}:
+            _network_violations.append(address)
+            raise AssertionError(f"test attempted a live service port: {address}")
+        return _original_connect(sock, address)
+    _network_guard = patch.object(socket.socket, 'connect', connect)
+    _network_guard.start()
+
+
+def tearDownModule():
+    _network_guard.stop()
+    # http_ok catches exceptions; retain attempted ports so a swallowed assertion still fails.
+    if _network_violations:
+        raise AssertionError(f"tests attempted live service ports: {_network_violations}")
 
 
 class Stub(BaseHTTPRequestHandler):
@@ -58,6 +82,7 @@ class ExporterProxyTruth(unittest.TestCase):
                 "id": "stub", "provider": "claude", "base_url": f"http://127.0.0.1:{srv.server_port}",
                 "management_path": "/m"}]}))
             mod = load_exporter(tmp)
+            mod.DASHBOARD = f"http://127.0.0.1:{srv.server_port}"
             mod.PROXIES = {"claude": (f"http://127.0.0.1:{srv.server_port}",
                                        f"http://127.0.0.1:{srv.server_port}/m", "stub")}
             with patch.object(mod, 'fetch_usage', return_value=(True, json.dumps(health_payload()).encode())), \
