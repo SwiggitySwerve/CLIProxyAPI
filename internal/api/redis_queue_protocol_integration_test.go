@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 )
 
@@ -354,7 +355,7 @@ func TestRedisProtocol_SUBSCRIBE_UsageSendsSupportRefresh(t *testing.T) {
 	if errMessage != nil {
 		t.Fatalf("failed to read usage message: %v", errMessage)
 	}
-	if channel != "usage" || string(payload) != `{"id":1}` {
+	if channel != "usage" || ojson.GetBytes(payload, "id").Int() != 1 || ojson.GetBytes(payload, "queue_seq").Uint() == 0 || ojson.GetBytes(payload, "boot_id").String() == "" {
 		t.Fatalf("unexpected usage message channel=%q payload=%q", channel, string(payload))
 	}
 }

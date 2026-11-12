@@ -4,6 +4,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/MoeForge/moego/ojson"
+	"github.com/google/uuid"
+	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -12,6 +16,9 @@ const (
 	usageSubscriberBuffer         = 256
 	errorSubscriberBuffer         = 256
 
+	maxReplayRecords = 16_384
+	maxReplayBytes   = 16 << 20 // Bound retained payloads independently of record size/rate.
+
 	usageSupportRefreshPayload = `{"support_refresh":true}`
 	usageRefreshPayload        = `{"refresh":true}`
 )
@@ -19,11 +26,13 @@ const (
 type queueItem struct {
 	enqueuedAt time.Time
 	payload    []byte
+	sequence   uint64
 }
 
 type itemBuffer struct {
 	items []queueItem
 	head  int
+	bytes int
 }
 
 type queue struct {
@@ -31,6 +40,9 @@ type queue struct {
 	mu               sync.Mutex
 	subscribers      map[uint64]chan []byte
 	nextSubscriberID uint64
+	replay           itemBuffer
+	nextSequence     uint64
+	nowFunc          func() time.Time
 }
 
 var (
@@ -38,6 +50,7 @@ var (
 	retentionSeconds atomic.Int64
 	global           queue
 	errorGlobal      queue
+	bootID           = uuid.NewString()
 )
 
 func init() {
@@ -71,9 +84,6 @@ func Enqueue(payload []byte) {
 		return
 	}
 	if len(payload) == 0 {
-		return
-	}
-	if global.publishToSubscribers(payload) {
 		return
 	}
 	global.enqueue(payload)
@@ -120,6 +130,8 @@ func (q *queue) clear() {
 	}
 	q.items = nil
 	q.head = 0
+	q.bytes = 0
+	q.replay = itemBuffer{}
 	q.subscribers = nil
 	q.mu.Unlock()
 
@@ -129,23 +141,57 @@ func (q *queue) clear() {
 }
 
 func (q *queue) enqueue(payload []byte) {
-	now := time.Now()
-
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if !Enabled() {
+		return
+	}
+	now := q.now()
+	sequence := q.nextSequence + 1
+	if ojson.ValidBytes(payload) && ojson.ParseBytes(payload).IsObject() {
+		doc := ojson.NewDoc(payload)
+		if err := doc.Set("queue_seq", sequence); err != nil {
+			log.Errorf("usage queue sequence: %v", err)
+			return
+		}
+		if err := doc.Set("boot_id", bootID); err != nil {
+			log.Errorf("usage queue boot id: %v", err)
+			return
+		}
+		payload = doc.Bytes()
+	} else {
+		payload = append([]byte(nil), payload...)
+	}
+	q.nextSequence = sequence
+	item := queueItem{enqueuedAt: now, payload: payload, sequence: sequence}
+	q.replay.pruneLocked(now)
+	q.replay.appendLocked(item)
+	for len(q.replay.items)-q.replay.head > maxReplayRecords || q.replay.bytes > maxReplayBytes {
+		q.replay.dropOldestLocked()
+	}
+	q.replay.maybeCompactLocked()
 
 	q.pruneLocked(now)
-	q.items = append(q.items, queueItem{
-		enqueuedAt: now,
-		payload:    append([]byte(nil), payload...),
-	})
+	if !q.publishLocked(payload) {
+		q.appendLocked(item)
+	}
 	q.maybeCompactLocked()
+}
+
+func (q *queue) now() time.Time {
+	if q.nowFunc != nil {
+		return q.nowFunc()
+	}
+	return time.Now()
 }
 
 func (q *queue) publishToSubscribers(payload []byte) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	return q.publishLocked(payload)
+}
 
+func (q *queue) publishLocked(payload []byte) bool {
 	if len(q.subscribers) == 0 {
 		return false
 	}
@@ -201,12 +247,10 @@ func (q *queue) unsubscribe(id uint64) {
 }
 
 func (q *queue) popOldest(count int) [][]byte {
-	now := time.Now()
-
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	q.pruneLocked(now)
+	q.pruneLocked(q.now())
 	available := len(q.items) - q.head
 	if available <= 0 {
 		q.items = nil
@@ -219,12 +263,64 @@ func (q *queue) popOldest(count int) [][]byte {
 
 	out := make([][]byte, 0, count)
 	for i := 0; i < count; i++ {
-		item := q.items[q.head+i]
-		out = append(out, item.payload)
+		out = append(out, append([]byte(nil), q.items[q.head].payload...))
+		q.dropOldestLocked()
 	}
-	q.head += count
 	q.maybeCompactLocked()
 	return out
+}
+
+// ReplayPage is a snapshot of the retained log, independent of pop/subscription state.
+type ReplayPage struct {
+	BootID    string
+	OldestSeq uint64
+	NextSeq   uint64
+	Records   []ReplayRecord
+}
+
+type ReplayRecord struct {
+	QueueSeq uint64
+	Payload  []byte
+}
+
+// ReadAfter returns at most count records after the cursor, without removing them.
+// An empty log has OldestSeq equal to the last assigned sequence plus one.
+func ReadAfter(after uint64, count int) ReplayPage {
+	global.mu.Lock()
+	defer global.mu.Unlock()
+	q := &global
+	q.replay.pruneLocked(q.now())
+	q.replay.maybeCompactLocked()
+	page := ReplayPage{BootID: bootID, OldestSeq: q.nextSequence + 1, NextSeq: after}
+	if q.replay.head < len(q.replay.items) {
+		page.OldestSeq = q.replay.items[q.replay.head].sequence
+	}
+	// Advance over pruned records even if none remain, so they are counted once.
+	if page.NextSeq < page.OldestSeq-1 {
+		page.NextSeq = page.OldestSeq - 1
+	}
+	for _, item := range q.replay.items[q.replay.head:] {
+		if item.sequence <= after {
+			continue
+		}
+		if len(page.Records) >= count {
+			break
+		}
+		page.Records = append(page.Records, ReplayRecord{QueueSeq: item.sequence, Payload: append([]byte(nil), item.payload...)})
+		page.NextSeq = item.sequence
+	}
+	return page
+}
+
+func (q *itemBuffer) appendLocked(item queueItem) {
+	q.items = append(q.items, item)
+	q.bytes += len(item.payload)
+}
+
+func (q *itemBuffer) dropOldestLocked() {
+	q.bytes -= len(q.items[q.head].payload)
+	q.items[q.head] = queueItem{}
+	q.head++
 }
 
 func (q *itemBuffer) pruneLocked(now time.Time) {
@@ -240,7 +336,7 @@ func (q *itemBuffer) pruneLocked(now time.Time) {
 	}
 	cutoff := now.Add(-time.Duration(windowSeconds) * time.Second)
 	for q.head < len(q.items) && q.items[q.head].enqueuedAt.Before(cutoff) {
-		q.head++
+		q.dropOldestLocked()
 	}
 }
 

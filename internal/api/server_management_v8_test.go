@@ -12,10 +12,45 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 )
+
+func TestManagementV8UsageReplayRoute(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+	previous := redisqueue.Enabled()
+	redisqueue.SetEnabled(false)
+	t.Cleanup(func() {
+		redisqueue.SetEnabled(false)
+		redisqueue.SetEnabled(previous)
+	})
+	server := newTestServer(t)
+	redisqueue.Enqueue([]byte(`{"id":1}`))
+	for _, authorized := range []bool{false, true} {
+		req := httptest.NewRequest(http.MethodGet, "/v8/management/observability/usage/queue?after_seq=0", nil)
+		if authorized {
+			req.Header.Set("Authorization", "Bearer test-management-key")
+		}
+		rec := httptest.NewRecorder()
+		server.engine.ServeHTTP(rec, req)
+		if !authorized {
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("unauthenticated status = %d", rec.Code)
+			}
+			continue
+		}
+		page := ojson.ParseBytes(rec.Body.Bytes())
+		if rec.Code != 200 || page.Get("boot_id").String() == "" || len(page.Get("records").Array()) != 1 || page.Get("records.0.queue_seq").Uint() == 0 {
+			t.Fatalf("replay route: status=%d body=%s", rec.Code, rec.Body.String())
+		}
+	}
+	if len(redisqueue.PopOldest(10)) != 1 {
+		t.Fatal("replay route consumed queued record")
+	}
+}
 
 func TestManagementV8RoutesShareAccessControl(t *testing.T) {
 	gin.SetMode(gin.TestMode)
