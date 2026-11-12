@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -241,6 +242,17 @@ func TestResponsesWebsocketIdleUpstreamEOFIsSilent(t *testing.T) {
 		read()
 		_ = c.WriteMessage(websocket.TextMessage, []byte(lossCompleted))
 		if index == 1 {
+			// Half-close so the proxy reads EOF, then wait for the proxy to close its end. It
+			// does that only after recording the loss and dropping the connection, so a
+			// continuation sent after closed cannot race the EOF onto the dead socket.
+			tcpConn, ok := c.UnderlyingConn().(*net.TCPConn)
+			if !ok {
+				t.Error("upstream connection is not TCP")
+				close(closed)
+				return
+			}
+			_ = tcpConn.CloseWrite()
+			_, _ = io.Copy(io.Discard, tcpConn)
 			close(closed)
 			return
 		}
