@@ -19,16 +19,6 @@ import (
 // same credential, so a burst of client requests cannot hammer upstream.
 const allCooledTrialGap = 60 * time.Second
 
-// allCooledTrialVerdicts lists providers whose recheck verdict comes from a
-// half-open trial: the user's own request is sent on a cooled credential and
-// the verdict is read from the response headers. Providers not listed here are
-// rechecked through their registered QuotaRecheckAdapter's Verdict instead
-// (Codex today). A provider with neither is never rechecked when every
-// candidate is cooled.
-var allCooledTrialVerdicts = map[string]func(cooled *Auth, now time.Time) func(http.Header) QuotaVerdictState{
-	"claude": claudeTrialVerdict,
-}
-
 // claudeTrialVerdict judges a 200 served on the cooled credential with the
 // Claude adapter's own checks, against the windows that set its cooldown.
 func claudeTrialVerdict(cooled *Auth, now time.Time) func(http.Header) QuotaVerdictState {
@@ -148,7 +138,7 @@ func (m *Manager) allCooledNext(ctx context.Context, round *allCooledRound, prov
 	}
 	halfOpen := make([]*Auth, 0, len(candidates))
 	for _, candidate := range candidates {
-		if allCooledTrialVerdicts[quotaRecheckProviderKey(candidate.Provider)] != nil {
+		if providerQuotaFor(candidate.Provider).trialVerdict != nil {
 			halfOpen = append(halfOpen, candidate)
 		}
 	}
@@ -182,7 +172,7 @@ func (m *Manager) allCooledNext(ctx context.Context, round *allCooledRound, prov
 			provider:   key,
 			policy:     quotaRecheckPolicyFor(cfg, key),
 			identity:   newQuotaCooldownIdentity(candidate),
-			verdict:    allCooledTrialVerdicts[key](candidate, now),
+			verdict:    providerQuotaFor(key).trialVerdict(candidate, now),
 			knownReset: soonestKnownReset(candidate, now),
 		}
 		logEntryWithRequestID(ctx).WithFields(log.Fields{"provider": key, "auth_id": candidate.ID}).
@@ -199,7 +189,7 @@ func (m *Manager) allCooledAdapterRecheck(ctx context.Context, cfg *internalconf
 	cleared := false
 	for _, candidate := range candidates {
 		key := quotaRecheckProviderKey(candidate.Provider)
-		if allCooledTrialVerdicts[key] != nil {
+		if providerQuotaFor(key).trialVerdict != nil {
 			continue
 		}
 		adapter := m.quotaRecheckAdapter(key)

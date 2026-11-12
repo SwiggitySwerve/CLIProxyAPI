@@ -93,7 +93,8 @@ against `/backend-api/wham/usage`. It is cleared through `Manager.ResetQuota` on
 when `rate_limit.allowed` is true and `limit_reached` is false. Failed, non-200 or
 incomplete probes keep the cooldown. Disabled credentials are never probed.
 Providers plug in through `QuotaRecheckAdapter` (`quota_recheck.go`, registered per
-provider with `Manager.RegisterQuotaRecheckAdapter`; Codex and Claude have one). A cooldown is
+provider with `Manager.RegisterQuotaRecheckAdapter`; `NewManager` registers the Codex and Claude
+adapters from the provider registry, `provider_registry.go`). A cooldown is
 cleared only if it is still the one the probe observed (recover time, credential
 version and epoch unchanged), so a newer cooldown set mid-probe survives.
 Tests: `quota_reconcile_test.go`, `quota_recheck_test.go`.
@@ -152,8 +153,8 @@ When every candidate for a request is cooled, the request runs one recheck round
 it returns the cooldown 429 (`quota_all_cooled.go`, hooked into `executeMixedOnce` and
 `executeStreamMixedOnce` where selection fails). It only applies to credentials holding a
 quota cooldown whose provider mode is not `off`, never runs while an uncooled candidate
-exists, bypasses the per-credential schedule above, and skips Home mode. Providers listed
-in `allCooledTrialVerdicts` (Claude) get a half-open trial: the user's own request is sent
+exists, bypasses the per-credential schedule above, and skips Home mode. Providers whose
+registry entry has a `trialVerdict` (Claude) get a half-open trial: the user's own request is sent
 on the cooled credential with the oldest last check, then the next, up to
 `request-retry + 1` trials. A 200 whose `Anthropic-Ratelimit-Unified-Status` is `allowed`
 or `allowed_warning` is served and, in `clear` mode, clears the cooldown (guarded by the
@@ -199,8 +200,8 @@ credential gets traffic and a new observation instead of ranking on an old snaps
 window. Without `save-cooldown-status` observations are in memory only, so after a
 restart every credential is unobserved; a restored one is still judged by its age. The check uses the same `now` the pick uses.
 
-Reset time comes from a per-provider function, the `soonestResetWindows` table keyed by
-the credential's provider. Each function names its windows and returns the reset time
+Reset time comes from a per-provider function, the `resetWindow` of the credential's
+provider in the provider registry (`provider_registry.go`). Each function names its windows and returns the reset time
 to rank on plus the window name:
 
 - Claude (`Anthropic-Ratelimit-Unified-<window>-Reset`, epoch seconds), first usable
@@ -234,3 +235,69 @@ last save. Older builds ignore the `observation` field and the observation-only
 records (their `next_retry_after` is zero) and drop them on their next save.
 Code: `sdk/cliproxy/auth/quota_observation_state.go`; tests:
 `quota_observation_state_test.go`.
+
+## Provider registry (3.2) — inventory and plan
+
+Roadmap 3.2 replaces provider-name switches with a registry, one decision group per
+slice, each behind characterization tests written and run green on the unchanged code.
+
+Inventory (base `local/ultrafast-v8.0.65` at 8ada42e7): a grep for `case`/`==`/`!=`/`EqualFold` on
+provider string literals in `sdk/` and `internal/`, excluding `internal/translator/`
+and `internal/runtime/executor/`, gives 204 lines in 75 functions across 43 files,
+plus three provider-keyed maps. Grouped by the decision they make:
+
+1. **Quota observation and recheck (slice 1, done).** Now one `providerQuota` entry
+   per provider in `sdk/cliproxy/auth/provider_registry.go`:
+   - `quota_signals.go:20` `ProviderSupportsQuotaObservation` (claude, codex, devin);
+     its callers are unchanged: `quota_signals.go:42`, `cooldown_evidence_log.go:36`,
+     `quota_observation_state.go:92`, `internal/api/handlers/management/auth_files.go:898,918`.
+   - `selector_soonest_reset.go:60` `soonestResetWindows` (claude, codex).
+   - `quota_all_cooled.go:28` `allCooledTrialVerdicts` (claude), read at :151, :185, :202.
+   - `conductor.go:290-291` default `QuotaRecheckAdapter`s registered by `NewManager`.
+   Tests: `provider_quota_characterization_test.go`.
+2. **Quota-signal parsing into named windows (slice 2).** `quota_signals.go:196-242`
+   `isQuotaSignalHeaderForProvider` (per-provider header allowlist), `:175`
+   `quotaSignalRetentionRank`, `:94-116` `rejectedClaudeSignalsForCooldown` and
+   `sanitizePersistedClaudeCooldownSignals`; `quota_recheck_schedule.go:57` Codex
+   cadence defaults; `internal/config/quota_reconcile.go:45,91` legacy `true` = codex.
+3. **429 classification and cooldown scope (slice 3).** `selector.go:666`
+   `claudeUnifiedCooldownForAuth`; `scheduler.go:1641` `claudeCooldownSummaryLocked`;
+   `conductor_cooldown.go:399,492` restore of Claude cooldown signals and `:1237,1282,1474`
+   unified-rejection capture; `conductor_cooldown.go:90` `providerCoolingOverrideForAuth`;
+   `conductor_request_scoped_errors.go:240-268` request-scoped error rules per key section.
+4. **Authenticator, login and refresh (slice 4).** `internal/api/handlers/management/`:
+   `auth_files_v8.go:406-418` `StartOAuthV8` provider to login handler, `:435,480` Kimi
+   domain, `:535` `ImportOAuthV8`; `oauth_sessions.go:647-655` `NormalizeOAuthProvider`;
+   `auth_files_provider_oauth.go:425` identityless providers; `oauth_siwc.go:54,366`
+   Codex-only SIWC bind. `sdk/cliproxy/auth/types.go:1273,1669` Codex refresh lead;
+   `sdk/auth/filestore.go:254`; `internal/watcher/synthesizer/file.go:111,212,290,308,396`;
+   `sdk/cliproxy/service_auth.go:659,662` websocket teardown on removal.
+5. **Model catalog source (slice 5).** `sdk/cliproxy/service_models.go:114-200,229,240,342`;
+   `internal/registry/model_definitions.go:572-590` `GetStaticModelDefinitionsByChannel`;
+   `sdk/cliproxy/auth/conductor_models.go:541-561,701-721,837-847`;
+   `api_key_model_capabilities.go:373-399`; `oauth_model_alias.go:531-539`;
+   `sdk/cliproxy/antigravity_models.go:479,619,654`; `internal/registry/model_registry.go:342-344,2007,2034`;
+   `internal/client/codex/models/models.go:350,356`; `internal/api/server_routes.go:833,864`.
+6. **Executor and transport wiring (last; may stay a switch).**
+   `sdk/cliproxy/service_executors.go:233,302-326,578`; `conductor_execution.go:480-494`
+   provider to translator format; `scheduler.go:465` and `conductor_selection.go:2577`
+   websocket preference; `selector.go:1950-1956` `canonicalLCPProvider`;
+   `sdk/api/handlers/openai/openai_responses_websocket.go:504,583,735`,
+   `openai_responses_websocket_session.go:117`, `openai_images_handlers.go:293`,
+   `openai_videos_handlers.go:157`; `sdk/cliproxy/service_plugins.go:365`;
+   `sdk/cliproxy/usage/accounting.go:347`.
+7. **Config key sections (not planned).** These map a provider to its own config list
+   (`claude-api-key`, `codex-api-key`, ...): `types.go:707-717`,
+   `internal/api/handlers/management/config_auth_index.go:454-617`, `api_tools.go:946-962`,
+   `internal/config/config_v8.go:410,490`, `weight.go:47`, `config_yaml.go:918,924`,
+   `internal/watcher/synthesizer/config.go:328,331`, `internal/util/provider.go:20`.
+8. **Out of scope.** `internal/thinking/` (`apply.go`, `strip.go`, `summary.go`,
+   `validate.go`, `configuration_update.go`) switches on translator formats inside the
+   canonical-to-provider thinking pipeline, not on credential providers.
+   `internal/signature/provider_compatibility.go`, `internal/cache/signature_cache.go`,
+   `internal/pluginhost/adapters.go:93` and `internal/auth/kimi/kimi.go:71` classify
+   model families or domains.
+
+Slice order: 1, 2, 3, 4, 5, then decide on 6. Slices 1-3 stay inside
+`sdk/cliproxy/auth` and extend the same `providerQuota` entry; slice 4 is where the
+registry first needs to be exported (management handlers are another package).

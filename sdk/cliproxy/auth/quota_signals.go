@@ -16,12 +16,7 @@ const (
 // ProviderSupportsQuotaObservation reports whether the named provider emits a
 // passive credential-level quota snapshot understood by collectQuotaSignals.
 func ProviderSupportsQuotaObservation(provider string) bool {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "claude", "codex", "devin":
-		return true
-	default:
-		return false
-	}
+	return providerQuotaFor(provider).observes
 }
 
 // ObserveResponseHeadersForProvider replaces the passive quota snapshot with the
