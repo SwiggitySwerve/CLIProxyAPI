@@ -282,3 +282,133 @@ func TestProviderQuotaCharacterizationRecheckCadence(t *testing.T) {
 		t.Fatalf("codex overrides = %+v", p)
 	}
 }
+
+// Each provider's signal rank, per header class. Lower ranks survive the
+// header cap first, so this order is what collectQuotaSignals keeps.
+func TestProviderQuotaCharacterizationSignalRankOrder(t *testing.T) {
+	type ranked struct {
+		rank int
+		ok   bool
+	}
+	for provider, want := range map[string]map[string]ranked{
+		"codex": {
+			"retry-after":                              {0, true},
+			"x-codex-plan-type":                        {1, true},
+			"x-codex-active-limit":                     {1, true},
+			"x-codex-credits-balance":                  {1, true},
+			"x-codex-allowed":                          {2, true},
+			"x-codex-limit-reached":                    {2, true},
+			"x-codex-primary-used-percent":             {2, true},
+			"x-codex-secondary-reset-at":               {2, true},
+			"x-codex-code-review-primary-used-percent": {3, true},
+			"x-codex-bengalfox-primary-used-percent":   {4, true},
+			"x-codex-additional-l1-primary-reset-at":   {5, true},
+			"x-ratelimit-limit-requests":               {6, true},
+			// A primary- name without a limit marker, and other names, are not signals.
+			"x-codex-primary-foo":                {0, false},
+			"x-codex-something":                  {0, false},
+			"anthropic-ratelimit-unified-status": {0, false},
+			"content-type":                       {0, false},
+		},
+		"claude": {
+			"retry-after":                          {0, true},
+			"anthropic-ratelimit-unified-status":   {0, true},
+			"anthropic-ratelimit-unified-5h-reset": {0, true},
+			"x-codex-primary-used-percent":         {0, false},
+			"x-ratelimit-limit-requests":           {0, false},
+		},
+	} {
+		signalRank := providerQuotaFor(provider).signalRank
+		for name, w := range want {
+			rank, ok := signalRank(name)
+			if got := (ranked{rank, ok}); got != w {
+				t.Fatalf("%s signalRank(%q) = %+v, want %+v", provider, name, got, w)
+			}
+		}
+	}
+	for _, provider := range []string{"devin", "gemini", ""} {
+		if providerQuotaFor(provider).signalRank != nil {
+			t.Fatalf("%q has a signal rank, want none", provider)
+		}
+	}
+}
+
+// Only Claude pins cooldowns to its rejection signals and echoes them on the
+// 429 it returns; every gate that decides this answers the same way.
+func TestProviderQuotaCharacterizationCooldownSignalGates(t *testing.T) {
+	now := time.Now()
+	until := now.Add(time.Hour)
+	rejected := map[string]string{"Anthropic-Ratelimit-Unified-Status": "rejected"}
+	newAuth := func(provider string) *Auth {
+		return &Auth{ID: "a", Provider: provider, Unavailable: true, NextRetryAfter: until, Quota: QuotaState{
+			Exceeded: true, Reason: "credential_quota", NextRecoverAt: until,
+			cooldownEvaluated: true, cooldownSignals: rejected,
+		}}
+	}
+	for _, tc := range []struct {
+		provider string
+		want     bool
+	}{
+		{"claude", true}, {" Claude ", true}, {"CLAUDE", true},
+		{"codex", false}, {"devin", false}, {"gemini", false}, {"", false},
+	} {
+		// The cooldown error built from a provider name.
+		if got := newModelCooldownErrorWithCause("m", tc.provider, time.Minute, nil).claudeCooldown; got != tc.want {
+			t.Fatalf("cooldown error claudeCooldown(%q) = %v, want %v", tc.provider, got, tc.want)
+		}
+		// The selector's per-credential answer.
+		if got, _ := claudeUnifiedCooldownForAuth(newAuth(tc.provider), "", now); got != tc.want {
+			t.Fatalf("claudeUnifiedCooldownForAuth(%q) = %v, want %v", tc.provider, got, tc.want)
+		}
+		// The scheduler's summary, keyed by the shard's provider.
+		shard := &modelScheduler{entries: map[string]*scheduledAuth{"a": {
+			meta: &scheduledAuthMeta{providerKey: quotaRecheckProviderKey(tc.provider)}, auth: newAuth(tc.provider),
+			state: scheduledStateCooldown, nextRetryAt: until,
+		}}}
+		if got, _, _, _ := shard.claudeCooldownSummaryLocked("", "", now, nil); got != tc.want {
+			t.Fatalf("claudeCooldownSummaryLocked(%q) = %v, want %v", tc.provider, got, tc.want)
+		}
+	}
+	// An OpenAI-compatible credential named claude is not Claude.
+	compat := newAuth("claude")
+	compat.Attributes = map[string]string{"compat_name": "claude"}
+	if got, _ := claudeUnifiedCooldownForAuth(compat, "", now); got {
+		t.Fatal("claudeUnifiedCooldownForAuth(openai-compatible claude) = true, want false")
+	}
+
+	// Restore keeps persisted signals when either the credential or the record
+	// is Claude: on the credential, on a model, and on a model's own state saved
+	// beside a propagated credential quota ("independent").
+	for _, tc := range []struct {
+		auth, record string
+		want         bool
+	}{
+		{"claude", "", true}, {"codex", " Claude ", true}, {"codex", "codex", false}, {"gemini", "", false},
+	} {
+		for _, variant := range []string{"", "m", "independent"} {
+			manager := NewManager(nil, nil, nil)
+			auth := &Auth{ID: "a", Provider: tc.auth}
+			manager.auths["a"] = auth
+			model := variant
+			record := CooldownStateRecord{Provider: tc.record, AuthID: "a", Model: model, NextRetryAfter: until,
+				Quota: cooldownFieldsOf(QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: until}), CooldownSignals: rejected}
+			if variant == "independent" {
+				model = "m"
+				record.Model = model
+				record.CooldownSignals = nil
+				record.IndependentState = &ModelState{NextRetryAfter: until, Quota: QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: until}}
+				record.IndependentCooldownSignals = rejected
+			}
+			if !manager.restoreCooldownRecordLocked(record, now) {
+				t.Fatalf("restore %s/%q %q: not restored", tc.auth, tc.record, variant)
+			}
+			quota := auth.Quota
+			if model != "" {
+				quota = auth.ModelStates[model].Quota
+			}
+			if got := len(quota.cooldownSignals) > 0; got != tc.want {
+				t.Fatalf("restore %s/%q %q kept signals = %v, want %v", tc.auth, tc.record, variant, got, tc.want)
+			}
+		}
+	}
+}
