@@ -85,6 +85,7 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 			c.JSON(status, gin.H{"error": errPatch.Error()})
 			return
 		}
+		logCredentialStatusChange(targetAuth, *req.Disabled, targetAuth.Disabled)
 		locked = false
 		h.authStatusMu.Unlock()
 		if errHook := h.invokePostAuthPersistHooks(ctx, hookAuths); errHook != nil {
@@ -114,6 +115,7 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 		if !okSnapshot {
 			return
 		}
+		logCredentialStatusChange(targetAuth, *req.Disabled, targetAuth.Disabled)
 		h.reloadConfigAfterManagementSave(ctx, cfgSnapshot)
 		if h.tokenStore != nil {
 			_ = h.tokenStore.Delete(ctx, targetAuth.ID)
@@ -127,7 +129,9 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 		return
 	}
 
+	previousDisabled := targetAuth.Disabled
 	updatedAuth, committed, errModify := h.authManager.Modify(ctx, targetAuth.ID, targetAuth.RegistrationEpoch, func(current *coreauth.Auth) error {
+		previousDisabled = current.Disabled
 		applyAuthDisabledState(current, *req.Disabled)
 		return nil
 	})
@@ -139,6 +143,7 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
 		return
 	}
+	logCredentialStatusChange(updatedAuth, *req.Disabled, previousDisabled)
 	locked = false
 	h.authStatusMu.Unlock()
 	if errHook := h.invokePostAuthPersistHooks(ctx, []*coreauth.Auth{updatedAuth}); errHook != nil {
@@ -333,7 +338,9 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		return
 	}
 
+	var previousFields map[string]string
 	updatedAuth, committed, errModify := h.authManager.Modify(ctx, targetAuth.ID, targetAuth.RegistrationEpoch, func(current *coreauth.Auth) error {
+		previousFields = snapshotLogFieldValues(current.Metadata, req)
 		return applyAuthFileFieldsPatch(current, req, requestRetryPatch)
 	})
 	if errModify != nil {
@@ -349,6 +356,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
 		return
 	}
+	logCredentialFieldsChange(updatedAuth, req, requestRetryPatch, previousFields)
 	if h.postAuthPersistHook != nil {
 		if errHook := h.postAuthPersistHook(ctx, updatedAuth); errHook != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("post-auth persist hook failed: %v", errHook)})
