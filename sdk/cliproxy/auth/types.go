@@ -157,6 +157,15 @@ type Auth struct {
 	// cooldowns can still be cleared by any success.
 	cooldownRecordedSeq uint64 `json:"-"`
 
+	// credentialCooldownUntil is the deadline of a credential-wide cooldown
+	// that MarkResult recorded for a model-less failure. Without it the
+	// auth-level Unavailable/NextRetryAfter may be only the aggregate of the
+	// model states, which must not block a model whose own state is healthy.
+	// It holds only while Unavailable is set, so a success, reset or
+	// re-registration that clears Unavailable retires it; aggregation keeps
+	// it (updateAggregatedAvailability). Runtime only: not persisted.
+	credentialCooldownUntil time.Time `json:"-"`
+
 	recentRequests recentRequestRing `json:"-"`
 	indexAssigned  bool              `json:"-"`
 	// fileSnapshotPath and fileSnapshotDigest bind an unversioned file-synthesized

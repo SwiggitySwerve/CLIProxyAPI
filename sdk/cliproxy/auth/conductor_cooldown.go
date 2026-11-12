@@ -1058,8 +1058,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				state := ensureModelState(auth, modelKey)
 				modelState = state
 				resetModelState(state, now)
+				// Like retainAuthCooldown: only a success dispatched after the
+				// credential cooldown was recorded ends it.
+				if result.ExecutionSeq == 0 || result.ExecutionSeq > auth.cooldownRecordedSeq {
+					auth.credentialCooldownUntil = time.Time{}
+				}
 				updateAggregatedAvailability(auth, now)
-				if !hasModelError(auth, now) {
+				if _, _, credentialCooling := liveCredentialCooldown(auth, now); !hasModelError(auth, now) && !credentialCooling {
 					auth.LastError = nil
 					auth.StatusMessage = ""
 					auth.Status = StatusActive
@@ -1449,6 +1454,21 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					disableCooling = false
 				}
 				if !wasTerminalUnauthorized {
+					// With model states and no credential-wide cooldown, the
+					// auth-level cooldown fields are the model aggregate. Keep it
+					// out of this failure so the credential cooldown lasts only as
+					// long as the failure itself says.
+					strippedAggregate := false
+					if len(auth.ModelStates) > 0 && !shouldSkipCredentialCooldown(result.Error) {
+						_, _, liveCooldown := liveCredentialCooldown(auth, now)
+						liveCredentialQuota := auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now)
+						if !liveCooldown && !liveCredentialQuota {
+							auth.Unavailable = false
+							auth.NextRetryAfter = time.Time{}
+							applyCooldownFields(&auth.Quota, QuotaState{})
+							strippedAggregate = true
+						}
+					}
 					prevAuthQuotaActive := auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now)
 					prevAuthRecoverAt := auth.Quota.NextRecoverAt
 					prevAuthCooldownSignals := maps.Clone(auth.Quota.cooldownSignals)
@@ -1467,6 +1487,17 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						}
 					}
 					applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+					if !shouldSkipCredentialCooldown(result.Error) {
+						// Mark the cooldown just applied as credential-wide so
+						// selection does not mistake it for a model aggregate.
+						auth.credentialCooldownUntil = time.Time{}
+						if auth.Unavailable && auth.NextRetryAfter.After(now) {
+							auth.credentialCooldownUntil = auth.NextRetryAfter
+						} else if strippedAggregate {
+							// No cooldown applied: restore the model aggregate.
+							updateAggregatedAvailability(auth, now)
+						}
+					}
 					if !disableCooling && statusCodeFromResult(result.Error) == 429 && auth.Quota.Exceeded {
 						auth.Quota.cooldownEvaluated = true
 						if keptPriorAuthQuota {
@@ -1969,6 +2000,13 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 		auth.Unavailable = true
 		return
 	}
+	// A live credential cooldown from a model-less failure is no aggregate;
+	// model results must not end it. Otherwise the fields below are the
+	// aggregate again and an expired or cleared marker is dropped.
+	if _, _, ok := liveCredentialCooldown(auth, now); ok {
+		return
+	}
+	auth.credentialCooldownUntil = time.Time{}
 	if len(auth.ModelStates) == 0 {
 		clearAggregatedAvailability(auth)
 		return
