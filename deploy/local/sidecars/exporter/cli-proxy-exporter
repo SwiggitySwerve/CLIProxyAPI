@@ -154,33 +154,73 @@ def load_prices(db):
     return prices, context, tiers
 
 
+# Usage counters are running sums over usage_events, folded in by id. Re-aggregating the whole
+# table each scrape (~800k rows) spilled a temp B-tree to disk every time: ~230 MB written per
+# scrape, on a host whose QLC-backed pool stalls under sustained writes. The sums are rebuilt
+# from scratch only when existing rows can have changed under them: the cache-accounting
+# migration rewrites token columns, and context-tier thresholds decide each row's price band.
+# Rows CPA-Manager-Plus archives (deletes) stay counted, so the counters never drop.
+_usage = {"key": None, "last_id": 0, "groups": {}}
+_usage_lock = threading.Lock()
+
+
+# Each event is priced by its band, as the dashboard does: a request whose total input
+# (cached included) is above a model's context-tier threshold (e.g. >272K) uses that
+# tier's rates; otherwise the stored service tier (priority/fast, ultrafast)
+# selects its own price row. Legacy "-fast" aliases kept the
+# client's tier, so the name suffix also selects priority for their historical events.
+USAGE_GROUPS_SQL = """
+    SELECT provider, COALESCE(NULLIF(requested_model,''), model) AS req_model,
+           COALESCE(NULLIF(resolved_model,''), model) AS billing_model,
+           COALESCE(NULLIF(account_snapshot,''), auth_label_snapshot, auth_index) AS account,
+           api_key_hash, failed,
+           COUNT(*), SUM(input_tokens), SUM(output_tokens), SUM(cached_tokens), SUM(reasoning_tokens),
+           SUM(total_tokens), SUM(normalized_uncached_input_tokens), SUM(normalized_cache_read_tokens),
+           SUM(normalized_cache_creation_tokens), SUM(latency_ms),
+           SUM(CASE WHEN ttft_ms > 0 THEN ttft_ms ELSE 0 END), SUM(CASE WHEN ttft_ms > 0 THEN 1 ELSE 0 END),
+           SUM(CASE WHEN failed=0 AND total_tokens=0 THEN 1 ELSE 0 END), MAX(timestamp_ms),
+           LOWER(TRIM(COALESCE(service_tier, ''))) AS tier,
+           COALESCE((SELECT MAX(t.threshold_tokens) FROM model_price_context_tiers t
+                     WHERE t.model IN (NULLIF(e.resolved_model, ''), e.model)
+                       AND COALESCE(e.normalized_total_input_tokens, e.input_tokens, 0) > t.threshold_tokens),
+                    0) AS context_band
+    FROM usage_events e WHERE e.id > ? AND e.id <= ?
+    GROUP BY 1,2,3,4,5,6,tier,context_band"""
+
+
+def usage_cache_key(db):
+    tiers = db.execute("SELECT model, threshold_tokens FROM model_price_context_tiers ORDER BY 1, 2").fetchall()
+    migrations = db.execute(
+        "SELECT name, status, applied_rows, updated_at_ms FROM usage_data_migrations"
+        " WHERE name LIKE 'usage_cache_accounting%' ORDER BY name").fetchall() \
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='usage_data_migrations'").fetchone() else []
+    return tuple(tiers), tuple(migrations)
+
+
 def collect_usage(m: Metrics):
     db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True, timeout=5)
     try:
+        # A full pass (first scrape, or after a rebuild) sorts in memory instead of temp files.
+        db.execute("PRAGMA temp_store=MEMORY")
         aliases = dict(db.execute("SELECT api_key_hash, alias FROM api_key_aliases").fetchall()) \
             if db.execute("SELECT 1 FROM sqlite_master WHERE name='api_key_aliases'").fetchone() else {}
         prices, context_prices, tier_prices = load_prices(db)
-        # Each event is priced by its band, as the dashboard does: a request whose total input
-        # (cached included) is above a model's context-tier threshold (e.g. >272K) uses that
-        # tier's rates; otherwise the stored service tier (priority/fast, ultrafast)
-        # selects its own price row. Legacy "-fast" aliases kept the
-        # client's tier, so the name suffix also selects priority for their historical events.
-        rows = db.execute("""
-            SELECT provider, COALESCE(NULLIF(requested_model,''), model) AS req_model,
-                   COALESCE(NULLIF(resolved_model,''), model) AS billing_model,
-                   COALESCE(NULLIF(account_snapshot,''), auth_label_snapshot, auth_index) AS account,
-                   api_key_hash, failed,
-                   COUNT(*), SUM(input_tokens), SUM(output_tokens), SUM(cached_tokens), SUM(reasoning_tokens),
-                   SUM(total_tokens), SUM(normalized_uncached_input_tokens), SUM(normalized_cache_read_tokens),
-                   SUM(normalized_cache_creation_tokens), SUM(latency_ms),
-                   SUM(CASE WHEN ttft_ms > 0 THEN ttft_ms ELSE 0 END), SUM(CASE WHEN ttft_ms > 0 THEN 1 ELSE 0 END),
-                   SUM(CASE WHEN failed=0 AND total_tokens=0 THEN 1 ELSE 0 END), MAX(timestamp_ms),
-                   LOWER(TRIM(COALESCE(service_tier, ''))) AS tier,
-                   COALESCE((SELECT MAX(t.threshold_tokens) FROM model_price_context_tiers t
-                             WHERE t.model IN (NULLIF(e.resolved_model, ''), e.model)
-                               AND COALESCE(e.normalized_total_input_tokens, e.input_tokens, 0) > t.threshold_tokens),
-                            0) AS context_band
-            FROM usage_events e GROUP BY 1,2,3,4,5,6,tier,context_band""").fetchall()
+        with _usage_lock:
+            key = usage_cache_key(db)
+            max_id = db.execute("SELECT COALESCE(MAX(id), 0) FROM usage_events").fetchone()[0]
+            if key != _usage["key"] or max_id < _usage["last_id"]:
+                _usage.update(key=key, last_id=0, groups={})
+            if max_id > _usage["last_id"]:
+                # fetchall before merging: a query that fails part-way must not leave half the
+                # rows folded in, or the next scrape would count them twice.
+                for r in db.execute(USAGE_GROUPS_SQL, (_usage["last_id"], max_id)).fetchall():
+                    group = r[:6] + r[20:]  # provider .. failed, tier, context_band
+                    new = [v or 0 for v in r[6:19]] + [r[19] or 0]
+                    old = _usage["groups"].get(group)
+                    _usage["groups"][group] = new if old is None else \
+                        [a + b for a, b in zip(old[:13], new[:13])] + [max(old[13], new[13])]
+                _usage["last_id"] = max_id
+            rows = [g[:6] + tuple(v) + g[6:] for g, v in _usage["groups"].items()]
         last_event = 0
         for (prov, req_model, billing_model, account, key_hash, failed, calls, tin, tout, tcached, treason, ttotal,
              n_uncached, n_cache_read, n_cache_create, lat, ttft, ttft_n, zero, last_ts, tier,
