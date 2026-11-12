@@ -718,8 +718,8 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 		if accountType != "" {
 			entry["account_type"] = accountType
 		}
-		// For API-key credentials AccountInfo returns the raw key; never list it for config keys.
-		if account != "" && !configKey {
+		// For API-key credentials AccountInfo returns the raw key; never list it.
+		if account != "" && accountType != "api_key" {
 			entry["account"] = account
 		}
 	}

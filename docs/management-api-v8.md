@@ -267,7 +267,9 @@ entry has `kind`: `auth_file` or `config_api_key`. Config API-key entries also
 report `source: "config"` and `account_type: "api_key"`, and carry the same
 runtime state fields (`status`, `next_retry_after`, `quota`, `model_quotas`,
 `priority`, `cooldowns`) as file-backed entries. The key itself is never listed,
-and `account` is omitted for them. Their `id` and `name` are the runtime auth ID,
+and `account` is omitted for them. File-backed API-key credentials likewise
+report `account_type: "api_key"` and omit `account`; only OAuth credentials
+report `account` (the account email). Config API-key entries' `id` and `name` are the runtime auth ID,
 a hash-derived string. The v0 listing is unchanged and does not include them.
 
 File-oriented mutations still refuse these entries: `PATCH /credentials/fields`

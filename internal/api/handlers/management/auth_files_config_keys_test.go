@@ -193,3 +193,41 @@ func TestCredentialFileMutationsRejectConfigAPIKeys(t *testing.T) {
 		t.Fatalf("config key was modified or removed: ok=%v attrs=%+v", ok, auth)
 	}
 }
+
+// File-backed credentials whose secret is an API key must not echo the key in
+// the `account` field (AccountInfo returns the raw key for API-key auths).
+func TestListCredentialsFileBackedAPIKeyExposesNoKeyMaterial(t *testing.T) {
+	const fileKeySecret = "sk-file-SECRET-apikey-material"
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	cfg := &config.Config{AuthDir: t.TempDir()}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	path := filepath.Join(cfg.AuthDir, "claude-key.json")
+	if errWrite := os.WriteFile(path, []byte(`{"type":"claude"}`), 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	registerAuthForLookupTest(t, manager, &coreauth.Auth{
+		ID: "claude-key.json", Index: "index-file-key", FileName: "claude-key.json", Provider: "claude", Status: coreauth.StatusActive,
+		Attributes: map[string]string{"path": path, "api_key": fileKeySecret},
+	})
+	h := NewHandlerWithoutConfigFilePath(cfg, manager)
+
+	for _, v8 := range []bool{true, false} {
+		for _, query := range []string{"", "?page=1&page_size=10"} {
+			files, body := listCredentialsRaw(t, h, query, v8)
+			if strings.Contains(body, fileKeySecret) || strings.Contains(body, "SECRET") {
+				t.Fatalf("v8=%v query %q: listing leaked the key: %s", v8, query, body)
+			}
+			entry := files["claude-key.json"]
+			if entry == nil {
+				t.Fatalf("v8=%v query %q: file-backed key missing: %s", v8, query, body)
+			}
+			if entry["account_type"] != "api_key" {
+				t.Fatalf("v8=%v query %q: account_type = %v", v8, query, entry["account_type"])
+			}
+			if account, present := entry["account"]; present {
+				t.Fatalf("v8=%v query %q: exposes account %v", v8, query, account)
+			}
+		}
+	}
+}
