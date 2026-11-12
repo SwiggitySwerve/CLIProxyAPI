@@ -20,12 +20,14 @@ func TestQuotaWindowResetAt(t *testing.T) {
 	observedAt := time.Unix(1787279282, 0)
 	tests := []struct {
 		name       string
+		provider   string // empty means codex
 		signals    map[string]string
 		unobserved bool
 		want       int64 // epoch seconds; 0 means no usable reset time
 	}{
 		{
-			name: "claude prefers the 7d window",
+			name:     "claude prefers the 7d window",
+			provider: "claude",
 			signals: map[string]string{
 				"Anthropic-Ratelimit-Unified-5h-Reset": "1787296800",
 				"Anthropic-Ratelimit-Unified-7d-Reset": "1787695200",
@@ -34,7 +36,8 @@ func TestQuotaWindowResetAt(t *testing.T) {
 			want: 1787695200,
 		},
 		{
-			name: "claude falls back to the unified reset",
+			name:     "claude falls back to the unified reset",
+			provider: "claude",
 			signals: map[string]string{
 				"Anthropic-Ratelimit-Unified-5h-Reset": "1787296800",
 				"Anthropic-Ratelimit-Unified-Reset":    "1787300000",
@@ -42,11 +45,13 @@ func TestQuotaWindowResetAt(t *testing.T) {
 			want: 1787300000,
 		},
 		{
-			name:    "claude 5h reset alone is not the long window",
-			signals: map[string]string{"Anthropic-Ratelimit-Unified-5h-Reset": "1787296800"},
+			name:     "claude 5h reset alone is not the long window",
+			provider: "claude",
+			signals:  map[string]string{"Anthropic-Ratelimit-Unified-5h-Reset": "1787296800"},
 		},
 		{
-			name: "claude unparsable 7d falls back",
+			name:     "claude unparsable 7d falls back",
+			provider: "claude",
 			signals: map[string]string{
 				"Anthropic-Ratelimit-Unified-7d-Reset": "soon",
 				"Anthropic-Ratelimit-Unified-Reset":    "1787296800",
@@ -54,7 +59,8 @@ func TestQuotaWindowResetAt(t *testing.T) {
 			want: 1787296800,
 		},
 		{
-			name: "claude zero 7d falls back",
+			name:     "claude zero 7d falls back",
+			provider: "claude",
 			signals: map[string]string{
 				"Anthropic-Ratelimit-Unified-7d-Reset": "0",
 				"Anthropic-Ratelimit-Unified-Reset":    "1787296800",
@@ -62,7 +68,8 @@ func TestQuotaWindowResetAt(t *testing.T) {
 			want: 1787296800,
 		},
 		{
-			name: "claude millisecond 7d is absurd and falls back",
+			name:     "claude millisecond 7d is absurd and falls back",
+			provider: "claude",
 			signals: map[string]string{
 				"Anthropic-Ratelimit-Unified-7d-Reset": "1787695200000",
 				"Anthropic-Ratelimit-Unified-Reset":    "1787296800",
@@ -70,12 +77,14 @@ func TestQuotaWindowResetAt(t *testing.T) {
 			want: 1787296800,
 		},
 		{
-			name:    "claude negative reset is rejected",
-			signals: map[string]string{"Anthropic-Ratelimit-Unified-7d-Reset": "-5"},
+			name:     "claude negative reset is rejected",
+			provider: "claude",
+			signals:  map[string]string{"Anthropic-Ratelimit-Unified-7d-Reset": "-5"},
 		},
 		{
-			name:    "reset long before the observation is rejected",
-			signals: map[string]string{"Anthropic-Ratelimit-Unified-7d-Reset": "1"},
+			name:     "reset long before the observation is rejected",
+			provider: "claude",
+			signals:  map[string]string{"Anthropic-Ratelimit-Unified-7d-Reset": "1"},
 		},
 		{
 			name:    "codex secondary reset-at",
@@ -154,15 +163,102 @@ func TestQuotaWindowResetAt(t *testing.T) {
 			if tt.unobserved {
 				observe = time.Time{}
 			}
-			got, ok := quotaWindowResetAt(tt.signals, observe)
+			provider := tt.provider
+			if provider == "" {
+				provider = "codex"
+			}
+			got, _, ok := soonestResetWindow(provider, tt.signals, observe, "")
 			if tt.want == 0 {
 				if ok {
-					t.Fatalf("quotaWindowResetAt() = %v, true; want no reset time", got)
+					t.Fatalf("soonestResetWindow() = %v, true; want no reset time", got)
 				}
 				return
 			}
 			if !ok || got.Unix() != tt.want {
-				t.Fatalf("quotaWindowResetAt() = %v (%d), %v; want %d", got, got.Unix(), ok, tt.want)
+				t.Fatalf("soonestResetWindow() = %v (%d), %v; want %d", got, got.Unix(), ok, tt.want)
+			}
+		})
+	}
+}
+
+func TestSoonestResetWindowNamesTheWindowUsed(t *testing.T) {
+	t.Parallel()
+
+	observedAt := time.Unix(1787279282, 0)
+	const (
+		fable = "claude-fable-5-2"
+		opus  = "claude-opus-5-5"
+	)
+	allClaude := map[string]string{
+		"Anthropic-Ratelimit-Unified-5h-Reset":    "1787296800",
+		"Anthropic-Ratelimit-Unified-7d-Reset":    "1787695200",
+		"Anthropic-Ratelimit-Unified-7d_oi-Reset": "1787600000",
+		"Anthropic-Ratelimit-Unified-Reset":       "1787296800",
+	}
+	tests := []struct {
+		name       string
+		provider   string
+		model      string
+		signals    map[string]string
+		wantWindow string
+		want       int64
+	}{
+		{name: "claude default is 7d", provider: "claude", model: opus, signals: allClaude, wantWindow: "7d", want: 1787695200},
+		{name: "claude fable model uses 7d_oi", provider: "claude", model: fable, signals: allClaude, wantWindow: "7d_oi", want: 1787600000},
+		{name: "claude fable without a 7d_oi header uses 7d", provider: "claude", model: fable, signals: claudeResetSignals(map[string]time.Time{"Anthropic-Ratelimit-Unified-7d-Reset": time.Unix(1787695200, 0)}), wantWindow: "7d", want: 1787695200},
+		{name: "claude without 7d uses unified", provider: "claude", model: opus, signals: map[string]string{"Anthropic-Ratelimit-Unified-Reset": "1787300000"}, wantWindow: "unified", want: 1787300000},
+		{name: "claude 7d_oi alone does not rank a non-fable model", provider: "claude", model: opus, signals: map[string]string{"Anthropic-Ratelimit-Unified-7d_oi-Reset": "1787600000"}},
+		{name: "claude 5h alone never ranks", provider: "claude", model: fable, signals: map[string]string{"Anthropic-Ratelimit-Unified-5h-Reset": "1787296800"}},
+		{name: "codex prefers secondary", provider: "codex", signals: map[string]string{"X-Codex-Secondary-Reset-At": "1787588999", "X-Codex-Primary-Reset-At": "1787290000"}, wantWindow: "secondary", want: 1787588999},
+		{name: "codex falls back to primary", provider: "codex", signals: map[string]string{"X-Codex-Primary-Reset-At": "1787290000"}, wantWindow: "primary", want: 1787290000},
+		{name: "provider match ignores case and spaces", provider: " Claude ", model: opus, signals: allClaude, wantWindow: "7d", want: 1787695200},
+		{name: "unknown provider has no windows", provider: "gemini", model: opus, signals: allClaude},
+		{name: "empty provider has no windows", provider: "", model: opus, signals: allClaude},
+		{name: "claude auth does not read codex headers", provider: "claude", model: opus, signals: map[string]string{"X-Codex-Secondary-Reset-At": "1787588999"}},
+		{name: "codex auth does not read claude headers", provider: "codex", signals: allClaude},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, window, ok := soonestResetWindow(tt.provider, tt.signals, observedAt, tt.model)
+			if tt.want == 0 {
+				if ok {
+					t.Fatalf("soonestResetWindow() = %v, %q, true; want no reset time", got, window)
+				}
+				return
+			}
+			if !ok || got.Unix() != tt.want || window != tt.wantWindow {
+				t.Fatalf("soonestResetWindow() = %d, %q, %v; want %d, %q", got.Unix(), window, ok, tt.want, tt.wantWindow)
+			}
+		})
+	}
+}
+
+// TestSoonestResetRankStalenessBoundary pins the threshold edge with a fixed clock:
+// an observation exactly soonestResetStaleAfter old is current, one nanosecond older
+// is Unknown and ranks as refresh whatever its reset time or signals say.
+func TestSoonestResetRankStalenessBoundary(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1787279282, 0)
+	signals := claude7dReset(now.Add(48 * time.Hour))
+	tests := []struct {
+		name       string
+		observedAt time.Time
+		signals    map[string]string
+		wantRank   int
+	}{
+		{name: "just observed", observedAt: now, signals: signals, wantRank: soonestResetRankKnown},
+		{name: "exactly at the threshold is current", observedAt: now.Add(-soonestResetStaleAfter), signals: signals, wantRank: soonestResetRankKnown},
+		{name: "one nanosecond past the threshold is stale", observedAt: now.Add(-soonestResetStaleAfter - time.Nanosecond), signals: signals, wantRank: soonestResetRankRefresh},
+		{name: "stale without a reset time still refreshes", observedAt: now.Add(-2 * soonestResetStaleAfter), signals: map[string]string{"Anthropic-Ratelimit-Unified-Status": "allowed"}, wantRank: soonestResetRankRefresh},
+		{name: "current without a reset time is unknown", observedAt: now.Add(-time.Minute), signals: map[string]string{"Anthropic-Ratelimit-Unified-Status": "allowed"}, wantRank: soonestResetRankUnknown},
+		{name: "never observed refreshes", signals: signals, wantRank: soonestResetRankRefresh},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rank, _ := soonestResetRank(soonestResetTestAuth("a", tt.observedAt, tt.signals), "claude-opus-5-5", now)
+			if rank != tt.wantRank {
+				t.Fatalf("soonestResetRank() rank = %d, want %d", rank, tt.wantRank)
 			}
 		})
 	}
@@ -310,6 +406,132 @@ func TestSoonestResetSelectorPickRanking(t *testing.T) {
 				t.Fatalf("Pick() = %v, want %s", got, tt.want)
 			}
 		})
+	}
+}
+
+func claudeResetSignals(resets map[string]time.Time) map[string]string {
+	signals := make(map[string]string, len(resets))
+	for header, reset := range resets {
+		signals[header] = strconv.FormatInt(reset.Unix(), 10)
+	}
+	return signals
+}
+
+func TestSoonestResetSelectorStaleObservationRanksAsRefresh(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	fresh := now.Add(-10 * time.Minute)
+	stale := now.Add(-soonestResetStaleAfter - time.Hour)
+	justInside := now.Add(-soonestResetStaleAfter + time.Minute)
+
+	tests := []struct {
+		name  string
+		auths []*Auth
+		want  string
+	}{
+		{
+			name: "stale observation with a far reset is tried before a fresh sooner reset",
+			auths: []*Auth{
+				soonestResetTestAuth("a", stale, claude7dReset(now.Add(96*time.Hour))),
+				soonestResetTestAuth("b", fresh, claude7dReset(now.Add(2*time.Hour))),
+			},
+			want: "a",
+		},
+		{
+			name: "stale observation without a reset time is refreshed instead of ranking last",
+			auths: []*Auth{
+				soonestResetTestAuth("a", stale, map[string]string{"Anthropic-Ratelimit-Unified-Status": "allowed"}),
+				soonestResetTestAuth("b", fresh, claude7dReset(now.Add(2*time.Hour))),
+			},
+			want: "a",
+		},
+		{
+			name: "stale observations tie by ID like unobserved credentials",
+			auths: []*Auth{
+				soonestResetTestAuth("c", stale, claude7dReset(now.Add(time.Hour))),
+				soonestResetTestAuth("b", fresh, claude7dReset(now.Add(2*time.Hour))),
+				soonestResetTestAuth("a", stale, claude7dReset(now.Add(96*time.Hour))),
+			},
+			want: "a",
+		},
+		{
+			name: "observation just inside the threshold still counts",
+			auths: []*Auth{
+				soonestResetTestAuth("a", justInside, claude7dReset(now.Add(96*time.Hour))),
+				soonestResetTestAuth("b", fresh, claude7dReset(now.Add(2*time.Hour))),
+			},
+			want: "b",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := (&SoonestResetSelector{}).Pick(context.Background(), "claude", "claude-opus-5-5", cliproxyexecutor.Options{}, tt.auths)
+			if err != nil {
+				t.Fatalf("Pick() error = %v", err)
+			}
+			if got == nil || got.ID != tt.want {
+				t.Fatalf("Pick() = %v, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSoonestResetSelectorModelScopedWindowOnlyRanksItsModels(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	observed := now.Add(-10 * time.Minute)
+	withOI := func(id string, reset7d, resetOI time.Time) *Auth {
+		return soonestResetTestAuth(id, observed, claudeResetSignals(map[string]time.Time{
+			"Anthropic-Ratelimit-Unified-7d-Reset":    reset7d,
+			"Anthropic-Ratelimit-Unified-7d_oi-Reset": resetOI,
+		}))
+	}
+	auths := []*Auth{
+		withOI("a", now.Add(96*time.Hour), now.Add(time.Hour)),
+		soonestResetTestAuth("b", observed, claude7dReset(now.Add(24*time.Hour))),
+	}
+
+	tests := []struct {
+		name  string
+		model string
+		want  string
+	}{
+		{name: "fable model ranks on the 7d_oi window", model: "claude-fable-5-2", want: "a"},
+		{name: "non-fable model ignores the 7d_oi window", model: "claude-opus-5-5", want: "b"},
+		{name: "empty model ignores the 7d_oi window", model: "", want: "b"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := (&SoonestResetSelector{}).Pick(context.Background(), "claude", tt.model, cliproxyexecutor.Options{}, auths)
+			if err != nil {
+				t.Fatalf("Pick() error = %v", err)
+			}
+			if got == nil || got.ID != tt.want {
+				t.Fatalf("Pick(%q) = %v, want %s", tt.model, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSoonestResetSelectorUnknownProviderKeepsFillFirstOrder(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	observed := now.Add(-10 * time.Minute)
+	// "b" would win on reset time if its Claude headers were read, but the provider
+	// has no window table, so ID order decides.
+	auths := []*Auth{
+		{ID: "b", Provider: "gemini", Quota: QuotaState{ObservedAt: observed, Signals: claude7dReset(now.Add(time.Hour))}},
+		{ID: "a", Provider: "gemini", Quota: QuotaState{ObservedAt: observed, Signals: claude7dReset(now.Add(48 * time.Hour))}},
+	}
+	got, err := (&SoonestResetSelector{}).Pick(context.Background(), "gemini", "test-model", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil || got.ID != "a" {
+		t.Fatalf("Pick() = %v, want a", got)
 	}
 }
 

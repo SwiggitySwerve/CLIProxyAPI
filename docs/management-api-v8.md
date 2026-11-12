@@ -261,6 +261,11 @@ restart; deployments with multiple independent instances require session affinit
 
 Query local SIWC status for a Codex credential with `GET /v8/management/oauth/siwc/status?name=<name>` (or `?auth_index=<auth_index>`). The endpoint reads local credentials and runtime rejection state without triggering refresh or upstream verification requests, and returns `{"status": "off" | "valid" | "invalid"}`.
 
+Every `GET /credentials` entry includes `instance_id` (string) when the process
+has a valid `CLIPROXY_INSTANCE_ID` (the same value that labels usage-queue
+records: lowercase letters, digits and `-`, starting with a letter, at most 64
+characters). It is omitted when the variable is unset or invalid.
+
 For Codex entries, `GET /credentials` includes these non-secret summary fields:
 
 | Field | Type | Meaning |

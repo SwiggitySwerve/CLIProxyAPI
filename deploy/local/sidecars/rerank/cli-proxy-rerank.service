@@ -1,0 +1,7 @@
+[Unit]
+Description=Observe CLIProxyAPI account quotas (read-only)
+After=cli-proxy-api.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/bin/cli-proxy-rerank

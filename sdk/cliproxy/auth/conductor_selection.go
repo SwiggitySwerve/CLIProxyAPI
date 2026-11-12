@@ -3027,8 +3027,12 @@ func (m *Manager) warnLogAuthUnavailable(ctx context.Context, providers []string
 
 	coolingSummaries := make([]string, 0)
 	totalCandidates := 0
+	// excluded counts this provider's credentials left out before the cooldown
+	// check, by reason, so a disabled or already-tried credential does not
+	// vanish from an "all candidates are cooling down" warning.
+	excluded := make(map[string]int)
 	for _, candidate := range m.auths {
-		if candidate == nil || candidate.Disabled {
+		if candidate == nil {
 			continue
 		}
 		providerKey := executorKeyFromAuth(candidate)
@@ -3040,18 +3044,25 @@ func (m *Manager) warnLogAuthUnavailable(ctx context.Context, providers []string
 		if _, ok := m.executorLocked(providerKey); !ok {
 			continue
 		}
+		if candidate.Disabled {
+			excluded["disabled"]++
+			continue
+		}
 		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
 			continue
 		}
 		if !eligibility.allows(candidate) {
+			excluded["ineligible"]++
 			continue
 		}
 		if tried != nil {
 			if _, used := tried[candidate.ID]; used {
+				excluded["tried"]++
 				continue
 			}
 		}
 		if model != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
+			excluded["model_unsupported"]++
 			continue
 		}
 		totalCandidates++
@@ -3067,10 +3078,19 @@ func (m *Manager) warnLogAuthUnavailable(ctx context.Context, providers []string
 		sort.Strings(coolingSummaries)
 		entry := logEntryWithRequestID(ctx)
 		providerText := strings.Join(providers, ",")
+		excludedText := ""
+		if len(excluded) > 0 {
+			reasons := make([]string, 0, len(excluded))
+			for reason, count := range excluded {
+				reasons = append(reasons, fmt.Sprintf("%s=%d", reason, count))
+			}
+			sort.Strings(reasons)
+			excludedText = "; excluded before the cooldown check: " + strings.Join(reasons, ", ")
+		}
 		if len(providers) == 1 {
-			entry.Warnf("auth unavailable: %d of %d candidate(s) for model %q (provider=%s) are in cooldown: %s", len(coolingSummaries), totalCandidates, model, providerText, strings.Join(coolingSummaries, ", "))
+			entry.Warnf("auth unavailable: %d of %d candidate(s) for model %q (provider=%s) are in cooldown: %s%s", len(coolingSummaries), totalCandidates, model, providerText, strings.Join(coolingSummaries, ", "), excludedText)
 		} else {
-			entry.Warnf("auth unavailable: %d of %d candidate(s) for model %q (providers=%s) are in cooldown: %s", len(coolingSummaries), totalCandidates, model, providerText, strings.Join(coolingSummaries, ", "))
+			entry.Warnf("auth unavailable: %d of %d candidate(s) for model %q (providers=%s) are in cooldown: %s%s", len(coolingSummaries), totalCandidates, model, providerText, strings.Join(coolingSummaries, ", "), excludedText)
 		}
 	}
 }

@@ -1,0 +1,11 @@
+[Unit]
+Description=Relabel CLIProxyAPI Codex model catalog (" · CLIP")
+After=cli-proxy-api.service
+
+[Service]
+ExecStart=%h/bin/cli-proxy-catalog
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

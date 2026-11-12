@@ -582,12 +582,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 	}
 	attempted := make(map[string]struct{})
+	allCooled := newAllCooledRound(defaultRequestRetry)
 	var lastErr error
 	var upstreamErr error
 	for {
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
-				return cliproxyexecutor.Response{}, preferredExecutionAttemptError(lastErr, upstreamErr)
+				return cliproxyexecutor.Response{}, allCooled.errOr(preferredExecutionAttemptError(lastErr, upstreamErr))
 			}
 			return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
@@ -599,11 +600,20 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			pickOpts = withHomeExcludedAuthIDs(pickOpts, tried)
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
+		var trial *allCooledTrial
 		if errPick != nil {
+			finalErr := errPick
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
-				return cliproxyexecutor.Response{}, preferredExecutionAttemptError(lastErr, upstreamErr)
+				finalErr = preferredExecutionAttemptError(lastErr, upstreamErr)
 			}
-			return cliproxyexecutor.Response{}, errPick
+			var reselect bool
+			trial, auth, executor, provider, reselect = m.allCooledNext(ctx, allCooled, providers, routeModel, pickOpts, tried, errPick, finalErr)
+			if reselect {
+				continue
+			}
+			if trial == nil {
+				return cliproxyexecutor.Response{}, allCooled.errOr(finalErr)
+			}
 		}
 
 		entry := logEntryWithRequestID(ctx)
@@ -621,6 +631,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		execCtx = m.newUpstreamAttemptContext(execCtx)
 
 		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAliasForRequest(execCtx, auth, routeModel, pickOpts.Headers)
+		if trial != nil {
+			// A half-open trial runs on purpose on the model the cooldown blocks.
+			models, pooled, aliasResult, routing = m.executionModelCandidatesWithAlias(auth, routeModel)
+		}
 		if len(models) == 0 {
 			continue
 		}
@@ -756,6 +770,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				continue
 			}
 			m.MarkResult(execCtx, result)
+			m.finishAllCooledTrial(execCtx, trial, resp.Headers)
 			attemptAliasResult := resolveAttemptAliasResult(routing, auth, routeModel, upstreamModel, aliasResult)
 			rewriteForceMappedResponse(&resp, attemptAliasResult)
 			return resp, nil
@@ -1028,6 +1043,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	lastHomeAuthID := ""
 	homeSameAuthRetryPending := false
 	attempted := make(map[string]struct{})
+	allCooled := newAllCooledRound(defaultRequestRetry)
 	var lastErr error
 	var upstreamErr error
 	var roundTiming homeRetryRoundTiming
@@ -1039,7 +1055,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				if homeMode {
 					return nil, markHomeRetryRoundExhausted(preferredErr, roundTiming.RetryAfter(), true)
 				}
-				return nil, preferredErr
+				return nil, allCooled.errOr(preferredErr)
 			}
 			return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
@@ -1065,6 +1081,22 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 		} else {
 			auth, executor, provider, errPick = m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
+		}
+		var trial *allCooledTrial
+		if errPick != nil && !homeMode {
+			finalErr := errPick
+			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
+				finalErr = preferredExecutionAttemptError(lastErr, upstreamErr)
+			}
+			var reselect bool
+			trial, auth, executor, provider, reselect = m.allCooledNext(ctx, allCooled, providers, routeModel, pickOpts, tried, errPick, finalErr)
+			if reselect {
+				continue
+			}
+			if trial == nil {
+				return nil, allCooled.errOr(finalErr)
+			}
+			errPick = nil
 		}
 		if errPick != nil {
 			preferredErr := preferredExecutionAttemptError(lastErr, upstreamErr)
@@ -1172,7 +1204,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		execCtx = m.newUpstreamAttemptContext(execCtx)
 		models, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(auth, routeModel)
 		// Home owns dispatched credential availability; only local selections need state filtering.
-		if selection == nil {
+		// A half-open trial runs on purpose on the model the cooldown blocks.
+		if selection == nil && trial == nil {
 			models = m.filterExecutionModelsForRequest(execCtx, auth, routeModel, models, pooled, pickOpts.Headers)
 		}
 		if selection != nil && aliasResult.ForceMapping && responseAlias != "" {
@@ -1348,6 +1381,11 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				return wrapHomeStream(ctx, streamResult, nil, releaseAttempt), nil
 			}
 			return wrapHomeStream(ctx, streamResult, selection, releaseAttempt), nil
+		}
+		if trial != nil {
+			// The stream has delivered its first payload, so upstream accepted
+			// the request and its headers are final.
+			m.finishAllCooledTrial(execCtx, trial, streamResult.Headers)
 		}
 		return streamResult, nil
 	}

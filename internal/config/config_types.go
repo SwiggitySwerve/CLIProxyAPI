@@ -573,6 +573,23 @@ type RoutingConfig struct {
 	//     keep the binding and return the error (or retry the same credential) instead.
 	// Ignored when SessionAffinity is false.
 	SessionAffinityRebindOn string `yaml:"session-affinity-rebind-on,omitempty" json:"session-affinity-rebind-on,omitempty"`
+
+	// Ultrafast names the Codex credentials allowed to serve the "ultrafast" service tier.
+	// Local patch (see LOCAL-PATCH.md). Leaving it empty denies ultrafast for every credential.
+	Ultrafast UltrafastConfig `yaml:"ultrafast,omitempty" json:"ultrafast,omitempty"`
+}
+
+// UltrafastConfig lists the credentials entitled to the "ultrafast" service tier.
+// A Codex credential is allowed when it matches any entry in any list. All lists empty
+// means no credential is allowed.
+type UltrafastConfig struct {
+	// AccountIDs match the Codex "account_id" stored in the auth file metadata (preferred).
+	AccountIDs []string `yaml:"account-ids,omitempty" json:"account-ids,omitempty"`
+	// AuthIDs match the credential id, which is the auth file name.
+	AuthIDs []string `yaml:"auth-ids,omitempty" json:"auth-ids,omitempty"`
+	// Emails match the auth file "email" metadata. Not unique across providers, so it is
+	// only used when listed here.
+	Emails []string `yaml:"emails,omitempty" json:"emails,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

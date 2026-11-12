@@ -1,0 +1,11 @@
+[Unit]
+Description=Prometheus exporter for CLIProxyAPI usage, quota and health
+After=cli-proxy-api.service cpa-manager-plus.service
+
+[Service]
+ExecStart=%h/bin/cli-proxy-exporter
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
