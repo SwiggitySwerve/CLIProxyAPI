@@ -158,8 +158,13 @@ func TestCodexDuplexInitialFailure(t *testing.T) {
 						t.Fatal("healthy account never completed")
 					}
 					current, _ := manager.GetByID(bad.ID)
-					state := current.ModelStates[model]
-					if state == nil || state.LastError == nil || state.LastError.HTTPStatus != tc.status || !state.Unavailable {
+					// A credential-scoped quota failure is recorded on the credential only;
+					// other failures are recorded on the model that reported them.
+					if tc.quota {
+						if !current.Unavailable || !current.Quota.Exceeded || current.LastError == nil || current.LastError.HTTPStatus != tc.status {
+							t.Fatalf("initial failure was not recorded on the credential: unavailable=%v quota=%+v lastError=%+v", current.Unavailable, current.Quota, current.LastError)
+						}
+					} else if state := current.ModelStates[model]; state == nil || state.LastError == nil || state.LastError.HTTPStatus != tc.status || !state.Unavailable {
 						t.Fatalf("initial failure was not recorded: %+v", state)
 					}
 					if tc.quota && (current.Quota.Reason != "credential_quota" || current.Quota.NextRecoverAt.Before(before.Add(time.Hour))) {
