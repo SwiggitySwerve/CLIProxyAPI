@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
-"""Re-rank CLIProxyAPI credentials so the account whose weekly quota resets
-soonest is used first (use-it-or-lose-it), per provider.
+"""Read-only quota observer for CLIProxyAPI credentials.
 
-Pairs with routing.strategy=fill-first: the proxy always uses the highest
-`priority` credential that is available, and fails over down the list on
-429/5xx (routing.retry.request-retry > 0).
+Reads each credential's upstream usage (weekly quota used %, reset time, limited
+flag) through the proxy's usage relay and writes an advisory ranking (soonest
+weekly reset first) to state.json for the Prometheus exporter. It never changes
+the proxy: routing order is the proxy's own routing.strategy (soonest-reset),
+which compares credentials that share a priority. The only management calls are
+GET requests and the POST /requests/api-call usage read; --trace logs each one.
 
-Accounts that are limited right now, or whose quota can't be read, sink to the
-bottom so they're only used as a last resort.
+A probe that fails (timeout, HTTP 429 from the usage endpoint, bad body) records
+the credential as `unknown` and keeps its previous reading with its original
+`observed_at`; a failure never marks a credential limited.
 """
+import functools
 import json
 import os
+import re
 import sys
 import time
 import urllib.request
@@ -33,16 +38,39 @@ def load_instances():
         return BUILTIN_INSTANCES
 
 
-BASES = tuple(i["base_url"].rstrip("/") + i.get("management_path", "/v8/management") for i in load_instances())
+MGMT = [(i["id"], i["base_url"].rstrip("/") + i.get("management_path", "/v8/management")) for i in load_instances()]
 KEY = (Path.home() / ".config/cli-proxy-rerank/management-key").read_text().strip()
 AUTH_DIR = Path.home() / ".local/share/cli-proxy-api/auth"
-TOP = 100  # priority of the first-choice account; each next one is 10 lower
-DRY_RUN = "--dry-run" in sys.argv
+DRY_RUN = "--dry-run" in sys.argv  # probe and print, but do not write state.json
+TRACE = "--trace" in sys.argv  # log every management request to stderr
 # Last ranking, read by the Prometheus exporter (cli-proxy-exporter).
-STATE = Path.home() / ".local/share/cli-proxy-rerank/state.json"
+STATE = Path(os.environ.get("CLI_PROXY_RERANK_STATE") or Path.home() / ".local/share/cli-proxy-rerank/state.json")
+# The Claude usage probe uses the User-Agent the Claude proxy is configured with
+# (written by cli-proxy-claude-ua-sync into header-defaults); this is the image default if unreadable.
+CLAUDE_CONFIG = Path(os.environ.get("CLI_PROXY_CLAUDE_CONFIG") or Path.home() / ".local/share/cli-proxy-claude/config.yaml")
+CLAUDE_UA_FALLBACK = "claude-cli/2.1.280 (external, cli)"
+REQUEST_COUNTS = {}
+
+
+@functools.lru_cache(maxsize=None)
+def claude_user_agent():
+    try:
+        m = re.search(r'header-defaults:\s*\n\s+user-agent:\s*"([^"]+)"', CLAUDE_CONFIG.read_text())
+    except OSError:
+        m = None
+    if not m:
+        print(f"claude: no header-defaults user-agent in {CLAUDE_CONFIG.name}; using {CLAUDE_UA_FALLBACK}", file=sys.stderr)
+    return m.group(1) if m else CLAUDE_UA_FALLBACK
 
 
 def mgmt(base, method, path, body=None):
+    # Read-only contract: any GET, and the POST that relays an upstream usage read. Nothing else.
+    if not (method == "GET" or (method == "POST" and path == "/requests/api-call")):
+        raise RuntimeError(f"refusing {method} {path}: rerank is read-only")
+    REQUEST_COUNTS[method] = REQUEST_COUNTS.get(method, 0) + 1
+    if TRACE:
+        target = f" -> {body['url'].split('?')[0]}" if body else ""
+        print(f"trace: {method} {base}{path}{target}", file=sys.stderr)
     req = urllib.request.Request(
         base + path,
         method=method,
@@ -80,7 +108,7 @@ def codex_quota(cred):
 
 def claude_quota(cred):
     u = upstream(cred, "https://api.anthropic.com/api/oauth/usage",
-                 {"anthropic-beta": "oauth-2025-04-20", "User-Agent": "claude-cli/2.1.280 (external, cli)"})
+                 {"anthropic-beta": "oauth-2025-04-20", "User-Agent": claude_user_agent()})
     weekly = u["seven_day"]
     limited = any((w or {}).get("utilization", 0) >= 100 for w in (u.get("five_hour"), weekly))
     reset = datetime.fromisoformat(weekly["resets_at"])
@@ -136,43 +164,68 @@ def claude_extras(u):
     }
 
 
+def load_previous():
+    """Last written readings by (provider, account), for failed probes to fall back on."""
+    try:
+        state = json.loads(STATE.read_text())
+    except (OSError, ValueError):
+        return {}
+    return {(a["provider"], a["account"]): {"observed_at": state.get("updated_at"), **a}
+            for a in state.get("accounts", [])}
+
+
 def main():
     creds = []
-    for base in BASES:
-        for c in mgmt(base, "GET", "/credentials")["files"]:
-            creds.append({**c, "_base": base})
+    for inst_id, base in MGMT:
+        try:
+            files = mgmt(base, "GET", "/credentials")["files"]
+        except Exception as e:  # one instance down must not hide the other
+            print(f"{inst_id}: credentials unreadable: {e}", file=sys.stderr)
+            continue
+        for c in files:
+            creds.append({**c, "_base": base, "_instance": inst_id})
     by_provider = {}
     for c in creds:
         if c.get("provider") in PROBES and not c.get("disabled"):
             by_provider.setdefault(c["provider"], []).append(c)
 
-    state = {"updated_at": time.time(), "accounts": []}
+    previous = load_previous()
+    now = time.time()
+    state = {"updated_at": now, "accounts": []}
     for provider, group in sorted(by_provider.items()):
-        ranked = []
+        readings = []
         for c in group:
+            email = c["email"]
             try:
                 reset, used, limited = PROBES[provider](c)
-            except Exception as e:  # unreadable quota: keep as last resort
-                print(f"{provider}: {c['email']}: quota check failed: {e}", file=sys.stderr)
-                reset, used, limited = datetime.max.replace(tzinfo=timezone.utc), None, True
-            ranked.append((limited, reset, c["email"], used, c))
-        ranked.sort(key=lambda r: r[:3])
+                reading = {"limited": bool(limited), "used_percent": used, "reset_at": reset.timestamp(),
+                           "observed_at": now, "probe_status": "ok", "probe_error": None,
+                           **EXTRAS.get(email, {})}
+            except Exception as e:
+                # Unreadable quota is `unknown`, not limited: keep the previous reading and its age.
+                print(f"{provider}: {email}: quota check failed: {e}", file=sys.stderr)
+                reading = {"limited": False, "used_percent": None, "reset_at": None, "observed_at": None,
+                           **{k: v for k, v in previous.get((provider, email), {}).items()
+                              if k not in ("rank", "priority")},
+                           "probe_status": "unknown", "probe_error": f"{type(e).__name__}: {e}"[:120]}
+            readings.append((email, c, reading))
+        readings.sort(key=lambda r: (r[2]["limited"], r[2]["reset_at"] is None, r[2]["reset_at"] or 0, r[0]))
 
-        for i, (limited, reset, email, used, c) in enumerate(ranked):
-            prio = max(TOP - 10 * i, 1)
-            note = "LIMITED" if limited else f"{used}% used"
-            when = "unknown" if reset.year == 9999 else reset.astimezone().strftime("%a %b %d %H:%M")
-            changed = c.get("priority") != prio
-            print(f"{provider}: #{i + 1} {email:28} resets {when}  {note:>9}  priority {prio}"
-                  + ("" if not changed else f" (was {c.get('priority')})"))
-            if changed and not DRY_RUN:
-                mgmt(c["_base"], "PATCH", "/credentials/fields", {"name": c["name"], "priority": prio})
+        for i, (email, c, r) in enumerate(readings):
+            if r["probe_status"] == "ok":
+                note = "LIMITED" if r["limited"] else f"{r['used_percent']}% used"
+            else:
+                age = "never read" if r["observed_at"] is None else f"read {round((now - r['observed_at']) / 60)}m ago"
+                note = f"unknown ({age})"
+            when = "unknown" if r["reset_at"] is None else datetime.fromtimestamp(r["reset_at"]).strftime("%a %b %d %H:%M")
+            print(f"{provider}: #{i + 1} {email:28} resets {when}  {note}  priority {c.get('priority')}")
+            # `priority` is the proxy's current value (this script no longer sets it).
             state["accounts"].append({
-                "provider": provider, "account": email, "rank": i + 1, "priority": prio,
-                "limited": bool(limited), "used_percent": used,
-                "reset_at": None if reset.year == 9999 else reset.timestamp(),
-                **EXTRAS.get(email, {}),
+                "provider": provider, "account": email, "rank": i + 1, "priority": c.get("priority"),
+                "instance": c["_instance"], "auth_index": c.get("auth_index"), **r,
             })
+    print("management requests: " + ", ".join(f"{m}={n}" for m, n in sorted(REQUEST_COUNTS.items()))
+          + " (read-only: no PATCH/PUT/DELETE)")
     if not DRY_RUN:
         STATE.parent.mkdir(parents=True, exist_ok=True)
         tmp = STATE.with_suffix(".tmp")

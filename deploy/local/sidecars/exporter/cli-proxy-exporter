@@ -5,9 +5,12 @@ Everything is computed at scrape time from local sources, read-only:
   - CPA-Manager-Plus usage DB (~/.local/share/cpa-manager-plus/usage.sqlite):
     requests / tokens / latency / API-equivalent cost per provider, model,
     account and client key (label from the dashboard's API key aliases).
-  - cli-proxy-rerank state (~/.local/share/cli-proxy-rerank/state.json):
-    weekly quota used %, reset time, limited flag and routing rank per account.
-  - CLIProxyAPI management API: credential status (active / disabled / error).
+  - CLIProxyAPI management API (GET /credentials on each instance): the proxy's own
+    state per credential (available / cooling / unavailable / disabled, next_retry_after,
+    per-model cooldowns, quota signals and their age), labelled by instance and auth_index.
+    This is the source of truth for availability.
+  - cli-proxy-rerank state (~/.local/share/cli-proxy-rerank/state.json): ADVISORY weekly
+    quota used %, reset time, limited flag and soonest-reset rank per account, with its age.
   - Liveness of the proxy (:8317/healthz) and the dashboard (:18317).
 
 Serves /metrics on 127.0.0.1 and the cluster bridge address so the in-cluster
@@ -16,11 +19,13 @@ reachable from the host and the cluster.
 """
 import json
 import os
+import re
 import sqlite3
 import sys
 import threading
 import time
 import urllib.request
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -46,7 +51,7 @@ CLAUDE_WINDOW_NAMES = {"iguana_necktie": "Fable weekly", "seven_day": "Weekly", 
 
 
 def load_proxies():
-    """Instance map as {label: (base URL, management URL)}; the label is the provider name."""
+    """Instance map as {label: (base URL, management URL, instance id)}; the label is the provider name."""
     try:
         instances = json.loads(INSTANCES_FILE.read_text())["instances"]
     except FileNotFoundError:
@@ -55,7 +60,7 @@ def load_proxies():
     for i in instances:
         base = i["base_url"].rstrip("/")
         proxies[i["provider"] if i["provider"] not in proxies else i["id"]] = (
-            base, base + i.get("management_path", "/v8/management"))
+            base, base + i.get("management_path", "/v8/management"), i["id"])
     return proxies
 
 
@@ -82,6 +87,8 @@ class Metrics:
         self.lines = []  # "# HELP/TYPE" strings, or [series, value] pairs
         self.series = {}  # series -> its [series, value] pair, so repeats are summed
         self.declared = set()
+        self.now = time.time()  # one clock for the whole scrape
+        self.creds = None  # GET /credentials result, fetched once per scrape
 
     def add(self, name, kind, help_text, value, **labels):
         if name not in self.declared:
@@ -221,16 +228,38 @@ def collect_usage(m: Metrics):
 
 
 def collect_quota(m: Metrics):
+    # Advisory only: cli-proxy-rerank's own usage-endpoint reads. The proxy's state is in the
+    # cliproxy_credential_* metrics (collect_credentials); trust those for availability.
     state = json.loads(STATE.read_text())
     m.add("cliproxy_rerank_last_run_timestamp_seconds", "gauge", "Last successful cli-proxy-rerank run.", state["updated_at"])
+    m.add("cliproxy_rerank_state_age_seconds", "gauge", "Seconds since the last cli-proxy-rerank run (advisory data age).",
+          max(m.now - state["updated_at"], 0))
+    try:
+        creds = fetch_credentials(m)
+    except Exception:  # the advisory metrics above and below do not need the join
+        creds = []
+    by_auth = {(c["_instance"], c.get("auth_index")): c for c in creds}
+    by_email = {(c.get("provider"), c.get("email")): c for c in creds}
     for a in state["accounts"]:
         lab = dict(provider=a["provider"], account=a["account"])
+        cred = by_auth.get((a.get("instance"), a.get("auth_index"))) or by_email.get((a["provider"], a["account"]))
+        if cred:  # new advisory metrics carry instance and auth_index, not the account name
+            alab = dict(instance=cred["_instance"], provider=a["provider"], auth_index=cred.get("auth_index"))
+            m.add("cliproxy_account_advisory_age_seconds", "gauge",
+                  "Age of rerank's reading for the credential (advisory; its probe may have failed since).",
+                  max(m.now - (a.get("observed_at") or state["updated_at"]), 0), **alab)
+            if "probe_status" in a:
+                m.add("cliproxy_account_advisory_unknown", "gauge",
+                      "1 when rerank's last probe of the credential failed and the reading is carried over.",
+                      1 if a["probe_status"] == "unknown" else 0, **alab)
         if a.get("used_percent") is not None:
-            m.add("cliproxy_account_quota_used_percent", "gauge", "Weekly quota used.", a["used_percent"], **lab)
+            m.add("cliproxy_account_quota_used_percent", "gauge", "Weekly quota used (advisory, from rerank).", a["used_percent"], **lab)
         if a.get("reset_at"):
-            m.add("cliproxy_account_quota_reset_timestamp_seconds", "gauge", "Weekly quota reset time.", a["reset_at"], **lab)
-        m.add("cliproxy_account_limited", "gauge", "1 when the account is rate/quota limited.", 1 if a["limited"] else 0, **lab)
-        m.add("cliproxy_account_rank", "gauge", "Routing order within its provider (1 = used first).", a["rank"], **lab)
+            m.add("cliproxy_account_quota_reset_timestamp_seconds", "gauge", "Weekly quota reset time (advisory, from rerank).", a["reset_at"], **lab)
+        m.add("cliproxy_account_limited", "gauge",
+              "1 when rerank's last reading says the account is limited (advisory; see cliproxy_credential_available for the proxy's state).",
+              1 if a["limited"] else 0, **lab)
+        m.add("cliproxy_account_rank", "gauge", "Advisory soonest-reset order within its provider (1 = soonest; not the proxy's routing).", a["rank"], **lab)
         if a.get("credits_balance") is not None:
             m.add("cliproxy_account_credits_balance", "gauge",
                   "ChatGPT credit balance (spent once the plan quota is exhausted).", a["credits_balance"], **lab)
@@ -260,14 +289,82 @@ def collect_plans(m: Metrics):
               plan["monthly_usd"], provider=plan.get("provider"), account=plan.get("account", key), plan=plan.get("plan"))
 
 
+def parse_time(value):
+    """RFC 3339 timestamp (nanosecond precision, any offset) -> epoch seconds; None for empty or Go's zero time."""
+    if not value:
+        return None
+    t = re.sub(r"(\.\d{6})\d+", r"\1", str(value)).replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(t)
+    except ValueError:
+        return None
+    return None if dt.year < 2000 else dt.timestamp()
+
+
+def fetch_credentials(m: Metrics):
+    """GET /credentials on every instance, once per scrape: the proxy's own view of each credential."""
+    if m.creds is None:
+        files = []
+        for name, (_, mgmt, inst_id) in PROXIES.items():
+            ok, body = http_ok(f"{mgmt}/credentials", {"Authorization": f"Bearer {MGMT_KEY}"})
+            if not ok:
+                raise RuntimeError(f"{name} proxy credentials unreadable")
+            files += [{**c, "_instance": inst_id} for c in json.loads(body).get("files", [])]
+        m.creds = files
+    return m.creds
+
+
+# Quota signals the proxy records from upstream response headers (credential level and per model).
+CLAUDE_SIGNAL = re.compile(r"^anthropic-ratelimit-unified-(?:(\w+)-)?(utilization|reset|status)$", re.I)
+CODEX_SIGNAL = re.compile(r"^x-codex-(primary|secondary)-(used-percent|reset-at)$", re.I)
+
+
+def _number(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def collect_quota_signals(m: Metrics, lab, model, quota):
+    observed = parse_time((quota or {}).get("observed_at"))
+    if observed is None:
+        return
+    lab = dict(lab, model=model or "all")
+    m.add("cliproxy_credential_quota_observed_timestamp_seconds", "gauge",
+          "When the proxy last observed upstream quota signals for the credential (model all = credential level).",
+          observed, **lab)
+    m.add("cliproxy_credential_quota_age_seconds", "gauge",
+          "Seconds since the proxy last observed quota signals (stale readings are not current truth).",
+          max(m.now - observed, 0), **lab)
+    signals = quota.get("signals") or {}
+    codex_windows = {w: signals.get(f"X-Codex-{w.title()}-Window-Minutes") for w in ("primary", "secondary")}
+    for key, raw in signals.items():
+        cm, xm = CLAUDE_SIGNAL.match(key), CODEX_SIGNAL.match(key)
+        if cm:
+            window, kind = (cm.group(1) or "unified").lower(), cm.group(2).lower()
+        elif xm:
+            window, kind = xm.group(1).lower(), xm.group(2).lower()
+            if codex_windows.get(window) in (None, "", "0"):  # unused secondary window reports zeros
+                continue
+        else:
+            continue
+        wl = dict(lab, window=window)
+        if kind in ("utilization", "used-percent", "reset", "reset-at") and _number(raw) is None:
+            continue
+        if kind in ("utilization", "used-percent"):
+            ratio = _number(raw) / (100 if kind == "used-percent" else 1)
+            m.add("cliproxy_credential_quota_used_ratio", "gauge", "Quota window used, 0-1, from the proxy's signals.", ratio, **wl)
+        elif kind in ("reset", "reset-at"):
+            m.add("cliproxy_credential_quota_reset_timestamp_seconds", "gauge",
+                  "Quota window reset time from the proxy's signals.", _number(raw), **wl)
+        else:
+            m.add("cliproxy_credential_quota_status_info", "gauge",
+                  "Upstream quota window status from the proxy's signals (value always 1).", 1, status=raw, **wl)
+
+
 def collect_credentials(m: Metrics):
-    files = []
-    for name, (_, mgmt) in PROXIES.items():
-        ok, body = http_ok(f"{mgmt}/credentials", {"Authorization": f"Bearer {MGMT_KEY}"})
-        if not ok:
-            raise RuntimeError(f"{name} proxy credentials unreadable")
-        files += json.loads(body).get("files", [])
-    for c in files:
+    for c in fetch_credentials(m):
         state = "disabled" if c.get("disabled") else (c.get("status") or "unknown")
         # Codex and Claude word a quota limit differently; neither means the login is broken.
         if state == "error" and any(s in (c.get("status_message") or "") for s in ("usage_limit_reached", "rate_limit_error")):
@@ -275,11 +372,45 @@ def collect_credentials(m: Metrics):
         m.add("cliproxy_credential_info", "gauge", "Credential status (value always 1).", 1,
               provider=c.get("provider"), account=c.get("email") or c.get("name"), status=state)
 
+        # Proxy truth, labelled by instance and auth_index (no account names).
+        lab = dict(instance=c["_instance"], provider=c.get("provider"), auth_index=c.get("auth_index"))
+        retry = parse_time(c.get("next_retry_after"))
+        cooldowns = [d for d in c.get("cooldowns") or [] if (parse_time(d.get("retry_at")) or 0) > m.now]
+        cooling = (retry is not None and retry > m.now) or bool(cooldowns)
+        if c.get("disabled"):
+            kind = "disabled"
+        elif cooling:
+            kind = "cooling"
+        elif c.get("unavailable"):
+            kind = "unavailable"
+        else:
+            kind = "available"
+        m.add("cliproxy_credential_state", "gauge",
+              "Proxy's state of the credential: available, cooling (quota/error deadline pending), unavailable or disabled (value always 1).",
+              1, state=kind, status=c.get("status"), **lab)
+        m.add("cliproxy_credential_available", "gauge",
+              "1 when the proxy would route to this credential now (not disabled, unavailable or cooling).",
+              1 if kind == "available" else 0, **lab)
+        m.add("cliproxy_credential_quota_blocked", "gauge", "1 when the proxy has the credential blocked on quota.",
+              1 if c.get("quota_blocked") else 0, **lab)
+        if retry is not None:
+            m.add("cliproxy_credential_next_retry_timestamp_seconds", "gauge",
+                  "When the proxy will next try the credential (its next_retry_after).", retry, **lab)
+        for d in c.get("cooldowns") or []:
+            deadline = parse_time(d.get("retry_at"))
+            if deadline is not None:
+                m.add("cliproxy_credential_cooldown_retry_timestamp_seconds", "gauge",
+                      "Deadline of a credential- or model-scope cooldown held by the proxy.", deadline,
+                      scope=d.get("scope"), model=d.get("model_key") or "all", reason=d.get("reason"), **lab)
+        collect_quota_signals(m, lab, "", c.get("quota"))
+        for model, quota in (c.get("model_quotas") or {}).items():
+            collect_quota_signals(m, lab, model, quota)
+
 
 def render() -> str:
     m = Metrics()
     up_dash, _ = http_ok(f"{DASHBOARD}/management.html")
-    for name, (base, _) in PROXIES.items():
+    for name, (base, _, _) in PROXIES.items():
         up_proxy, _ = http_ok(f"{base}/healthz")
         m.add("cliproxy_up", "gauge", "Service reachable.", 1 if up_proxy else 0, service="proxy", proxy=name)
     m.add("cliproxy_up", "gauge", "Service reachable.", 1 if up_dash else 0, service="dashboard")

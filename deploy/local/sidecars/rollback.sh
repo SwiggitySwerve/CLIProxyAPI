@@ -61,4 +61,5 @@ if [ "$APPLY" -ne 1 ]; then
 else
   echo
   echo "Next (not done by this script): systemctl --user daemon-reload && systemctl --user restart cli-proxy-exporter cli-proxy-catalog"
+  echo "If the recovery-check timer was enabled and its files were removed: systemctl --user disable --now cli-proxy-recovery-check.timer"
 fi
