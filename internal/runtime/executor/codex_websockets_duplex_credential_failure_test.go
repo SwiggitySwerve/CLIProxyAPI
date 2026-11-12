@@ -130,8 +130,13 @@ func TestCodexDuplexLaterCredentialFailure(t *testing.T) {
 						t.Errorf("failure payload=%t terminal=%t", payloadSeen, terminalSeen)
 					}
 					current, _ := manager.GetByID(bad.ID)
-					state := current.ModelStates[model]
-					if state == nil || state.LastError == nil || state.LastError.HTTPStatus != status || !state.Unavailable {
+					// A credential-scoped 429 is recorded on the credential only; other
+					// failures are recorded on the model that reported them.
+					if status == 429 {
+						if !current.Unavailable || !current.Quota.Exceeded {
+							t.Errorf("account failure not recorded on the credential: unavailable=%v quota=%+v", current.Unavailable, current.Quota)
+						}
+					} else if state := current.ModelStates[model]; state == nil || state.LastError == nil || state.LastError.HTTPStatus != status || !state.Unavailable {
 						t.Errorf("account failure not recorded: %+v", state)
 					}
 					if status == 429 && (current.Quota.Reason != "credential_quota" || current.Quota.NextRecoverAt.Before(before.Add(time.Hour))) {

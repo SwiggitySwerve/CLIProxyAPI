@@ -652,11 +652,6 @@ func TestPluginExecutor429CredentialScopedCoolsEntireCredentialAndSiblingModels(
 			if !updated.Quota.NextRecoverAt.After(before.Add(110 * time.Second)) {
 				t.Fatalf("updated auth NextRecoverAt = %v, want > %v", updated.Quota.NextRecoverAt, before.Add(110*time.Second))
 			}
-			stateB := updated.ModelStates[modelB]
-			if stateB == nil || !stateB.Unavailable || !stateB.Quota.Exceeded || stateB.Quota.Reason != "credential_quota" {
-				t.Fatalf("sibling modelB state = %+v, want unavailable with reason=credential_quota", stateB)
-			}
-
 			// Sending requests for sibling modelB (pre-existing ModelState) and modelC (unvisited model)
 			// must NOT select the cooled credential again.
 			for _, siblingModel := range []string{modelB, modelC} {
