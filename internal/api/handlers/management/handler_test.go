@@ -121,3 +121,26 @@ func TestAuthenticateManagementKey_RepeatedSameWrongKeyDoesNotBan(t *testing.T) 
 		t.Fatalf("after five distinct wrong keys: allowed=%v status=%d msg=%q, want the ban", allowed, statusCode, errMsg)
 	}
 }
+
+// A repeated or missing key still takes one of the five slots: with a stale key
+// and a missing key already counted, three distinct guesses complete the ban.
+func TestAuthenticateManagementKey_RepeatedKeysShareTheFiveSlots(t *testing.T) {
+	h := &Handler{
+		cfg:            &config.Config{RemoteManagement: config.RemoteManagement{AllowRemote: true}},
+		failedAttempts: make(map[string]*attemptInfo),
+		envSecret:      "test-secret",
+	}
+	const host = "10.0.2.100"
+	for i := 0; i < 9; i++ {
+		h.AuthenticateManagementKey(host, false, "stale-key")
+	}
+	for i := 0; i < 3; i++ {
+		h.AuthenticateManagementKey(host, false, "")
+	}
+	for i := 0; i < 3; i++ {
+		h.AuthenticateManagementKey(host, false, fmt.Sprintf("guess-%d", i))
+	}
+	if allowed, statusCode, errMsg := h.AuthenticateManagementKey(host, false, "test-secret"); allowed || statusCode != http.StatusForbidden || !strings.HasPrefix(errMsg, "IP banned") {
+		t.Fatalf("after stale + missing + three guesses: allowed=%v status=%d msg=%q, want the ban", allowed, statusCode, errMsg)
+	}
+}

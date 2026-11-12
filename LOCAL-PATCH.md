@@ -317,6 +317,18 @@ Trusting that address instead would turn off brute-force protection for everyone
 remote callers arrive as the same address. Guessing still needs many distinct keys, so
 five of them still ban.
 
+Known limits:
+- A repeated wrong key is no longer throttled by a ban, so each repeat still runs one
+  bcrypt compare (about 45 ms when `secret-key` is a bcrypt hash). Accepted: it costs CPU,
+  not guessing strength.
+- A repeated key keeps its slot alive. Five *different* stale, missing or mistyped keys
+  from the shared address with no success in between still ban everyone on it.
+- Pre-existing, not changed here: any successful login from an address resets its
+  counter. On the shared `10.0.2.100`, a dashboard polling with the correct key keeps
+  resetting it, so the five-guesses-per-30-minutes bound does not hold for that address.
+  A fix would count per key fingerprint across successes; it is a separate decision.
+
 Tests: `TestAuthenticateManagementKey_RepeatedSameWrongKeyDoesNotBan`,
+`TestAuthenticateManagementKey_RepeatedKeysShareTheFiveSlots`,
 `TestAuthenticateManagementKey_LocalhostIPBan_BlocksCorrectKeyDuringBan` (now five
 distinct keys).
