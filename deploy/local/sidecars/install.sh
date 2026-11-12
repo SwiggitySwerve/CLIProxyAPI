@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install the local sidecars (rerank, exporter) and their systemd units to their live
+# Install the local sidecars (rerank, exporter, recovery-check) and their systemd units to their live
 # locations. Shows a diff for every file first; with --apply, backs the originals up to
 #   ~/.local/share/cli-proxy-backups/<timestamp>/   (undo with rollback.sh)
 # and then copies. Dry-run is the default: nothing is written without --apply.
@@ -36,6 +36,9 @@ FILES=(
   "$SRC/rerank/cli-proxy-rerank.timer|$UNITS/cli-proxy-rerank.timer|0644"
   "$SRC/exporter/cli-proxy-exporter|$BIN/cli-proxy-exporter|0700"
   "$SRC/exporter/cli-proxy-exporter.service|$UNITS/cli-proxy-exporter.service|0644"
+  "$SRC/recovery-check/cli-proxy-recovery-check|$BIN/cli-proxy-recovery-check|0700"
+  "$SRC/recovery-check/cli-proxy-recovery-check.service|$UNITS/cli-proxy-recovery-check.service|0644"
+  "$SRC/recovery-check/cli-proxy-recovery-check.timer|$UNITS/cli-proxy-recovery-check.timer|0644"
 )
 
 # Config the scripts read. Created only when missing, never overwritten.
@@ -120,4 +123,5 @@ done
 echo
 echo "Backup: $BACKUP"
 echo "Next (not done by this script): systemctl --user daemon-reload && systemctl --user restart cli-proxy-exporter"
-echo "Undo:   $SRC/rollback.sh --from $BACKUP --apply"
+echo "Recovery check, first install only: systemctl --user enable --now cli-proxy-recovery-check.timer"
+echo "Undo:  $SRC/rollback.sh --from $BACKUP --apply"
