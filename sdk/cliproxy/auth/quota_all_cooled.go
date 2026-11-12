@@ -69,13 +69,16 @@ type allCooledRound struct {
 	probed  bool
 	trials  int
 	budget  int
+	// requestRetry and retryRound say whether a retry round follows this one.
+	requestRetry int
+	retryRound   int
 	// finalErr is the error the request returned before the round existed. It
 	// is returned unchanged when no recheck succeeds.
 	finalErr error
 }
 
-func newAllCooledRound(requestRetry int) *allCooledRound {
-	return &allCooledRound{budget: max(requestRetry, 0) + 1}
+func newAllCooledRound(requestRetry, retryRound int) *allCooledRound {
+	return &allCooledRound{budget: max(requestRetry, 0) + 1, requestRetry: requestRetry, retryRound: retryRound}
 }
 
 // errOr returns the error captured when the round started, or fallback when
@@ -114,6 +117,17 @@ func (m *Manager) allCooledNext(ctx context.Context, round *allCooledRound, prov
 		}
 		cfg := m.runtimeConfigSnapshot()
 		if cfg == nil || cfg.Home.Enabled || len(cfg.QuotaReconcile) == 0 {
+			return nil, nil, nil, "", false
+		}
+		// A credential this request already tried that is still selectable (a
+		// dropped connection does not cool it) and that a following retry round
+		// will try again means the pool is not all cooled: the request's own
+		// retry goes back to it, so no half-open trial is spent on the cooled
+		// ones. A failure that cooled it, no retry round left, or a round that
+		// ended in a 429 keeps the trial: after a 429 the next round usually
+		// waits a quota floor first (a zero-hint transient 429 or disabled
+		// cooling would not, and then the trial is merely redundant).
+		if isRequestRetryRoundError(finalErr) && statusCodeFromError(finalErr) != http.StatusTooManyRequests && m.triedCredentialRetriedNextRound(ctx, round, providers, model, opts, tried) {
 			return nil, nil, nil, "", false
 		}
 		round.started = true
@@ -201,6 +215,38 @@ func (m *Manager) allCooledAdapterRecheck(ctx context.Context, cfg *internalconf
 		}
 	}
 	return cleared
+}
+
+// triedCredentialRetriedNextRound reports whether tried holds a credential
+// of one of providers that is selectable for model now and that a following
+// retry round of this request will try again.
+func (m *Manager) triedCredentialRetriedNextRound(ctx context.Context, round *allCooledRound, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) bool {
+	if len(tried) == 0 {
+		return false
+	}
+	providerSet := make(map[string]struct{}, len(providers))
+	for _, p := range providers {
+		if norm := canonicalSchedulingProvider(p); norm != "" && norm != "mixed" {
+			providerSet[norm] = struct{}{}
+		}
+	}
+	now := time.Now()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for id := range tried {
+		auth := m.auths[id]
+		if auth == nil || round.retryRound >= effectiveRequestRetryLimit(auth, round.requestRetry) {
+			continue
+		}
+		if blocked, _, _ := isAuthBlockedForModelForRequest(ctx, auth, m.selectionModelForAuth(auth, model), now, opts.Headers); blocked {
+			continue
+		}
+		if _, ok := providerSet[executorKeyFromAuth(auth)]; len(providerSet) > 0 && !ok {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // allCooledCandidates returns copies of the credentials that could serve model
