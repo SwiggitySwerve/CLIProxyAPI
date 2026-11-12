@@ -1222,8 +1222,8 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 
 // credentialAvailabilityBlock is the credential-wide part of the availability
 // predicate: the gates that block every model whatever its own state says.
-// model only extends a credential quota's deadline with that model's own
-// longer cooldown.
+// model only extends a credential quota's or credential cooldown's deadline
+// with that model's own longer cooldown.
 func credentialAvailabilityBlock(ctx context.Context, auth *Auth, model string, now time.Time, clientHeaders ...http.Header) (bool, blockReason, time.Time) {
 	if auth == nil {
 		return true, blockReasonOther, time.Time{}
@@ -1240,8 +1240,13 @@ func credentialAvailabilityBlock(ctx context.Context, auth *Auth, model string, 
 	if exp, ok := auth.AccessTokenExpirationTimeForRequest(ctx, clientHeaders...); ok && !exp.IsZero() && !exp.After(now) {
 		return true, blockReasonOther, time.Time{}
 	}
+	credReason, credNext := blockReasonNone, time.Time{}
 	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
-		credNext := auth.Quota.NextRecoverAt
+		credReason, credNext = blockReasonCooldown, auth.Quota.NextRecoverAt
+	} else if until, reason, ok := liveCredentialCooldown(auth, now); ok {
+		credReason, credNext = reason, until
+	}
+	if credReason != blockReasonNone {
 		if model != "" && len(auth.ModelStates) > 0 {
 			modelKey := canonicalModelLookupKey(model)
 			for stateModel, state := range auth.ModelStates {
@@ -1251,15 +1256,30 @@ func credentialAvailabilityBlock(ctx context.Context, auth *Auth, model string, 
 				if state.Status == StatusDisabled {
 					return true, blockReasonDisabled, time.Time{}
 				}
-				stateBlocked, _, next := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now)
+				stateBlocked, stateReason, next := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now)
 				if stateBlocked && next.After(credNext) {
 					credNext = next
+					if stateReason == blockReasonCooldown {
+						credReason = blockReasonCooldown
+					}
 				}
 			}
 		}
-		return true, blockReasonCooldown, credNext
+		return true, credReason, credNext
 	}
 	return false, blockReasonNone, time.Time{}
+}
+
+// liveCredentialCooldown reports a still-live credential-wide cooldown that
+// MarkResult recorded for a model-less failure (see credentialCooldownUntil).
+func liveCredentialCooldown(auth *Auth, now time.Time) (time.Time, blockReason, bool) {
+	if auth == nil || !auth.Unavailable || !auth.credentialCooldownUntil.After(now) || !auth.NextRetryAfter.Equal(auth.credentialCooldownUntil) {
+		return time.Time{}, blockReasonNone, false
+	}
+	if auth.credentialCooldownQuota {
+		return auth.credentialCooldownUntil, blockReasonCooldown, true
+	}
+	return auth.credentialCooldownUntil, blockReasonOther, true
 }
 
 // isAuthBlockedForModelForRequest is the availability predicate. Selection, the

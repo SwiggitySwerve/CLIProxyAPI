@@ -425,6 +425,8 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 			auth.Quota.ObservedAt = observation.ObservedAt
 			auth.Quota.Signals = observation.Signals
 			auth.cooldownRecordedSeq = existing.cooldownRecordedSeq
+			auth.credentialCooldownUntil = existing.credentialCooldownUntil
+			auth.credentialCooldownQuota = existing.credentialCooldownQuota
 		}
 		if credChanged || mode == updateModeRefresh {
 			applyPreservedRejectedTokens(existing, auth, mode == updateModeRefresh)
@@ -463,6 +465,11 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 					}
 					auth.LastError = nil
 					auth.StatusMessage = auth.Quota.Reason
+					// Only the quota survives: a credential cooldown left by the
+					// superseded auth failure must not keep blocking every model.
+					if !auth.credentialCooldownQuota {
+						auth.credentialCooldownUntil = time.Time{}
+					}
 					cooldownStateChanged = true
 				}
 				if canServeWithAccessToken {

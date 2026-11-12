@@ -178,6 +178,49 @@ func availabilityCharacterizationRows() []availabilityCharacterizationRow {
 			changed: "aggregate of model states",
 		},
 		{
+			name: "credential cooldown from a model-less failure, healthy states for M and N",
+			auth: func(now time.Time) *Auth {
+				until := now.Add(time.Minute)
+				return charAuth(func(a *Auth) {
+					a.Status = StatusError
+					a.Unavailable = true
+					a.NextRetryAfter = until
+					a.credentialCooldownUntil = until
+					a.ModelStates = map[string]*ModelState{charModel: charHealthyState(now), charOther: charHealthyState(now)}
+				})
+			},
+			want: availabilityAnswers{pick: false, cooled: false, credBlocked: true, listed: false},
+		},
+		{
+			name: "credential quota cooldown from a model-less 429, healthy states for M and N",
+			auth: func(now time.Time) *Auth {
+				until := now.Add(time.Minute)
+				return charAuth(func(a *Auth) {
+					a.Status = StatusError
+					a.Unavailable = true
+					a.NextRetryAfter = until
+					a.Quota = QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: until}
+					a.credentialCooldownUntil = until
+					a.credentialCooldownQuota = true
+					a.ModelStates = map[string]*ModelState{charModel: charHealthyState(now), charOther: charHealthyState(now)}
+				})
+			},
+			want: availabilityAnswers{pick: false, cooled: true, credBlocked: true, listed: false},
+		},
+		{
+			name: "credential cooldown superseded by a rewritten NextRetryAfter, healthy states for M and N",
+			auth: func(now time.Time) *Auth {
+				return charAuth(func(a *Auth) {
+					a.Status = StatusError
+					a.Unavailable = true
+					a.NextRetryAfter = now.Add(2 * time.Minute)
+					a.credentialCooldownUntil = now.Add(time.Minute)
+					a.ModelStates = map[string]*ModelState{charModel: charHealthyState(now), charOther: charHealthyState(now)}
+				})
+			},
+			want: availabilityAnswers{pick: true, cooled: false, credBlocked: false, listed: true},
+		},
+		{
 			name: "credential_quota live, no model states",
 			auth: func(now time.Time) *Auth {
 				until := now.Add(time.Hour)

@@ -1467,6 +1467,16 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						}
 					}
 					applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+					if !shouldSkipCredentialCooldown(result.Error) {
+						// Mark the cooldown just applied as credential-wide so
+						// selection does not mistake it for a model aggregate.
+						auth.credentialCooldownUntil = time.Time{}
+						auth.credentialCooldownQuota = false
+						if auth.Unavailable && auth.NextRetryAfter.After(now) {
+							auth.credentialCooldownUntil = auth.NextRetryAfter
+							auth.credentialCooldownQuota = statusCodeFromResult(result.Error) == http.StatusTooManyRequests && !isTransientRateLimitResultError(result.Error) && auth.Quota.Exceeded
+						}
+					}
 					if !disableCooling && statusCodeFromResult(result.Error) == 429 && auth.Quota.Exceeded {
 						auth.Quota.cooldownEvaluated = true
 						if keptPriorAuthQuota {

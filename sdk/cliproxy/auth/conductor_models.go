@@ -291,6 +291,10 @@ func (m *Manager) clientModelProjectionForAuth(auth *Auth, routeModel string, no
 				authFallbackUntil = retryAfter
 			}
 		}
+	} else if until, _, ok := liveCredentialCooldown(auth, now); ok {
+		// A credential-wide cooldown blocks every model, healthy states included.
+		isSuspended = true
+		authFallbackUntil = until
 	}
 
 	var suspendReason string
@@ -309,6 +313,9 @@ func (m *Manager) clientModelProjectionForAuth(auth *Auth, routeModel string, no
 			suspendUntil = stateUntil
 			if credQuotaSuspended && (strings.EqualFold(suspendReason, "quota") || strings.EqualFold(suspendReason, "credential_quota")) && credQuotaUntil.After(suspendUntil) {
 				suspendUntil = credQuotaUntil
+			}
+			if authFallbackUntil.After(suspendUntil) {
+				suspendUntil = authFallbackUntil
 			}
 		default:
 			suspendUntil = authFallbackUntil
