@@ -452,3 +452,39 @@ func TestManager_MarkResult_CredentialScopeDoesNotInheritModelBackoffLevel(t *te
 		})
 	}
 }
+
+func TestManager_MarkResult_CredentialScopeKeepsLongerAuthDeadline(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	m, auth := newCooldownMonotonicManager(t, "model-a", "model-b")
+	for _, model := range []string{"model-a", "model-b"} {
+		m.MarkResult(context.Background(), Result{AuthID: auth.ID, Provider: auth.Provider, Model: model, Success: true})
+	}
+
+	// A model-less 403 sets a long auth-level deadline.
+	m.MarkResult(context.Background(), Result{
+		AuthID: auth.ID, Provider: auth.Provider,
+		Success: false, Error: &Error{HTTPStatus: http.StatusForbidden, Message: "forbidden"},
+	})
+	before := time.Now()
+	blocked, _ := m.GetByID(auth.ID)
+	longDeadline := blocked.NextRetryAfter
+	if longDeadline.Before(before.Add(25 * time.Minute)) {
+		t.Fatalf("precondition failed: auth-level 403 deadline = %v, want ~30m", longDeadline)
+	}
+
+	// A shorter credential-scoped 429 must not shorten the auth-level deadline.
+	short := 10 * time.Second
+	m.MarkResult(context.Background(), Result{
+		AuthID: auth.ID, Provider: auth.Provider, Model: "model-a",
+		Success: false, RetryAfter: &short, CredentialScope: true,
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "credential 429"},
+	})
+
+	updated, _ := m.GetByID(auth.ID)
+	if updated.NextRetryAfter.Before(longDeadline) {
+		t.Fatalf("auth.NextRetryAfter = %v, shortened below live deadline %v", updated.NextRetryAfter, longDeadline)
+	}
+}
