@@ -50,6 +50,7 @@ roll_staging() {
   [ -z "$prev" ] || record_rollback staging "$prev"
   start_proxy "$IMAGE"
   wait_http "$(proxy_url)/healthz" 60 || die "staging proxy unhealthy after roll; previous image: ${prev:-none}"
+  wait_api_ready "$(proxy_url)" 60 || die "staging proxy API not ready after roll; previous image: ${prev:-none}"
   echo "staging rolled to $IMAGE"
   [ -z "$prev" ] || echo "rollback: $SELF staging $prev"
 }
@@ -86,8 +87,8 @@ roll_live() {
   sed -i "s|^Image=.*|Image=$IMAGE|" "$unit_path"
   systemctl --user daemon-reload
   systemctl --user restart "$service"
-  if wait_http "http://127.0.0.1:$port/healthz" 60; then
-    echo "$TARGET rolled to $IMAGE, /healthz ok"
+  if wait_http "http://127.0.0.1:$port/healthz" 60 && wait_api_ready "http://127.0.0.1:$port" 60; then
+    echo "$TARGET rolled to $IMAGE, /healthz ok, API ready"
   else
     echo "HEALTH CHECK FAILED for $TARGET on port $port" >&2
     echo "rollback now: $SELF $TARGET $rollback_image --approved" >&2
