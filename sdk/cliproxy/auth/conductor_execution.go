@@ -630,12 +630,14 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		execCtx = coreusage.WithSelectionID(execCtx, selectionIDFromOptions(pickOpts))
 		execCtx = m.newUpstreamAttemptContext(execCtx)
 
-		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAliasForRequest(execCtx, auth, routeModel, pickOpts.Headers)
+		candidates, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(auth, routeModel)
+		models := m.filterExecutionModelsForRequest(execCtx, auth, routeModel, candidates, pooled, pickOpts.Headers)
 		if trial != nil {
 			// A half-open trial runs on purpose on the model the cooldown blocks.
 			models, pooled, aliasResult, routing = m.executionModelCandidatesWithAlias(auth, routeModel)
 		}
 		if len(models) == 0 {
+			lastErr = m.blockedExecutionModelsError(execCtx, auth, routeModel, candidates, pooled, pickOpts.Headers)
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
@@ -853,8 +855,10 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		execCtx = coreusage.WithSelectionID(execCtx, selectionIDFromOptions(pickOpts))
 		execCtx = m.newUpstreamAttemptContext(execCtx)
 
-		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAliasForRequest(execCtx, auth, routeModel, pickOpts.Headers)
+		candidates, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(auth, routeModel)
+		models := m.filterExecutionModelsForRequest(execCtx, auth, routeModel, candidates, pooled, pickOpts.Headers)
 		if len(models) == 0 {
+			lastErr = m.blockedExecutionModelsError(execCtx, auth, routeModel, candidates, pooled, pickOpts.Headers)
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
@@ -1202,11 +1206,12 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			})
 		}
 		execCtx = m.newUpstreamAttemptContext(execCtx)
-		models, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(auth, routeModel)
+		candidates, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(auth, routeModel)
+		models := candidates
 		// Home owns dispatched credential availability; only local selections need state filtering.
 		// A half-open trial runs on purpose on the model the cooldown blocks.
 		if selection == nil && trial == nil {
-			models = m.filterExecutionModelsForRequest(execCtx, auth, routeModel, models, pooled, pickOpts.Headers)
+			models = m.filterExecutionModelsForRequest(execCtx, auth, routeModel, candidates, pooled, pickOpts.Headers)
 		}
 		if selection != nil && aliasResult.ForceMapping && responseAlias != "" {
 			aliasResult.OriginalAlias = responseAlias
@@ -1220,6 +1225,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "no_execution_models"); errEnd != nil {
 					return nil, errEnd
 				}
+			} else {
+				lastErr = m.blockedExecutionModelsError(execCtx, auth, routeModel, candidates, pooled, pickOpts.Headers)
 			}
 			continue
 		}
