@@ -3,7 +3,6 @@ package auth
 import (
 	"errors"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 )
@@ -20,29 +19,6 @@ type refreshStatusErr struct {
 func (e refreshStatusErr) Error() string   { return e.msg }
 func (e refreshStatusErr) StatusCode() int { return e.status }
 
-// withRefreshLeadFactory installs a factory for provider for the duration of
-// the test and restores the previous one afterwards.
-func withRefreshLeadFactory(t *testing.T, provider string, factory func() *time.Duration) {
-	t.Helper()
-	refreshLeadMu.Lock()
-	prev, had := refreshLeadFactories[provider]
-	if factory == nil {
-		delete(refreshLeadFactories, provider)
-	} else {
-		refreshLeadFactories[provider] = factory
-	}
-	refreshLeadMu.Unlock()
-	t.Cleanup(func() {
-		refreshLeadMu.Lock()
-		if had {
-			refreshLeadFactories[provider] = prev
-		} else {
-			delete(refreshLeadFactories, provider)
-		}
-		refreshLeadMu.Unlock()
-	})
-}
-
 func TestProviderRefreshCharacterization_DefaultRefreshLead(t *testing.T) {
 	for _, tc := range []struct {
 		provider string
@@ -58,7 +34,7 @@ func TestProviderRefreshCharacterization_DefaultRefreshLead(t *testing.T) {
 		{"devin", 0},
 		{"", 0},
 	} {
-		withRefreshLeadFactory(t, strings.ToLower(strings.TrimSpace(tc.provider)), nil)
+		setRefreshLeadFactory(t, tc.provider, nil)
 		got := ProviderRefreshLead(tc.provider, nil)
 		if tc.want == 0 {
 			if got != nil {
@@ -79,11 +55,11 @@ func TestProviderRefreshCharacterization_FactoryOverridesDefault(t *testing.T) {
 	// A registered factory wins over the built-in default, including a factory
 	// that returns no lead.
 	short := time.Hour
-	withRefreshLeadFactory(t, "codex", func() *time.Duration { return &short })
+	setRefreshLeadFactory(t, "codex", func() *time.Duration { return &short })
 	if got := ProviderRefreshLead("codex", nil); got == nil || *got != short {
 		t.Fatalf("codex with factory = %v, want %v", got, short)
 	}
-	withRefreshLeadFactory(t, "codex", func() *time.Duration { return nil })
+	setRefreshLeadFactory(t, "codex", func() *time.Duration { return nil })
 	if got := ProviderRefreshLead("codex", nil); got != nil {
 		t.Fatalf("codex with nil factory = %v, want nil", *got)
 	}
@@ -107,9 +83,9 @@ func TestProviderRefreshCharacterization_CodexOuterNeedsRefreshLead(t *testing.T
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.nilFactory {
-				withRefreshLeadFactory(t, tc.provider, func() *time.Duration { return nil })
+				setRefreshLeadFactory(t, tc.provider, func() *time.Duration { return nil })
 			} else {
-				withRefreshLeadFactory(t, tc.provider, nil)
+				setRefreshLeadFactory(t, tc.provider, nil)
 			}
 			a := &Auth{
 				Provider: tc.provider,
