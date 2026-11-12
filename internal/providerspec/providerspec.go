@@ -34,24 +34,46 @@ type Spec struct {
 	// IdentitylessLogin marks OAuth logins that return no account identity,
 	// so a targeted re-login cannot be matched by email or account id.
 	IdentitylessLogin bool
+	// ModelCatalog names the built-in static model catalog the provider's
+	// credentials read. Empty means none.
+	ModelCatalog string
+	// ModelCatalogAliases are further names that read ModelCatalog.
+	ModelCatalogAliases []string
+	// NoOAuthModelAlias marks providers whose OAuth credentials have no
+	// OAuth model alias channel.
+	NoOAuthModelAlias bool
 }
 
 // specs is keyed by lower-case provider and never written after init.
 var specs = map[string]Spec{
-	"claude": {OAuthFlow: "anthropic", OAuthAliases: []string{"claude"}},
+	"claude": {OAuthFlow: "anthropic", OAuthAliases: []string{"claude"}, ModelCatalog: "claude"},
 	"codex": {
 		DefaultRefreshLead:     CodexOuterRefreshLead,
 		InvalidGrantIsTerminal: true,
 		LegacyQuotaReconcile:   true,
 		OAuthFlow:              "codex",
 		OAuthAliases:           []string{"openai"},
+		ModelCatalog:           "codex",
 	},
-	"antigravity": {OAuthFlow: "antigravity", OAuthAliases: []string{"anti-gravity"}},
-	"xai":         {OAuthFlow: "xai", OAuthAliases: []string{"x-ai", "x.ai", "grok"}},
-	"devin":       {OAuthFlow: "devin", OAuthAliases: []string{"cognition"}},
-	"meta":        {OAuthFlow: "meta", OAuthAliases: []string{"muse"}},
-	"kimi":        {IdentitylessLogin: true},
-	"kimi-ai":     {IdentitylessLogin: true},
+	"gemini":              {ModelCatalog: "gemini", NoOAuthModelAlias: true},
+	"gemini-interactions": {ModelCatalog: "gemini"},
+	"vertex":              {ModelCatalog: "vertex"},
+	"aistudio":            {ModelCatalog: "aistudio"},
+	"antigravity":         {OAuthFlow: "antigravity", OAuthAliases: []string{"anti-gravity"}, ModelCatalog: "antigravity"},
+	"xai": {
+		OAuthFlow:           "xai",
+		OAuthAliases:        []string{"x-ai", "x.ai", "grok"},
+		ModelCatalog:        "xai",
+		ModelCatalogAliases: []string{"x-ai", "grok"},
+	},
+	"devin": {OAuthFlow: "devin", OAuthAliases: []string{"cognition"}, ModelCatalog: "devin"},
+	"meta":  {OAuthFlow: "meta", OAuthAliases: []string{"muse"}, ModelCatalog: "meta", ModelCatalogAliases: []string{"muse"}},
+	"kimi": {
+		IdentitylessLogin:   true,
+		ModelCatalog:        "kimi",
+		ModelCatalogAliases: []string{"kimi.ai", "kimi.com"},
+	},
+	"kimi-ai": {IdentitylessLogin: true, ModelCatalog: "kimi"},
 }
 
 // oauthFlows maps every accepted OAuth flow name and alias to its canonical flow.
@@ -64,6 +86,21 @@ var oauthFlows = func() map[string]string {
 		out[spec.OAuthFlow] = spec.OAuthFlow
 		for _, alias := range spec.OAuthAliases {
 			out[alias] = spec.OAuthFlow
+		}
+	}
+	return out
+}()
+
+// modelCatalogs maps every provider name and catalog alias to its static catalog.
+var modelCatalogs = func() map[string]string {
+	out := map[string]string{}
+	for provider, spec := range specs {
+		if spec.ModelCatalog == "" {
+			continue
+		}
+		out[provider] = spec.ModelCatalog
+		for _, alias := range spec.ModelCatalogAliases {
+			out[alias] = spec.ModelCatalog
 		}
 	}
 	return out
@@ -83,6 +120,12 @@ func For(provider string) Spec {
 func OAuthFlow(name string) (string, bool) {
 	flow, ok := oauthFlows[key(name)]
 	return flow, ok
+}
+
+// ModelCatalog returns the built-in static model catalog a provider name or
+// catalog alias reads, or "" when there is none.
+func ModelCatalog(name string) string {
+	return modelCatalogs[key(name)]
 }
 
 // LegacyQuotaReconcileProvider returns the provider the legacy

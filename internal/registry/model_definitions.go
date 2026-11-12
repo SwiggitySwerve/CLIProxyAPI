@@ -4,6 +4,8 @@ package registry
 
 import (
 	"strings"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/providerspec"
 )
 
 const (
@@ -552,28 +554,13 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 }
 
 // GetStaticModelDefinitionsByChannel returns static model definitions for a given channel/provider.
-// It returns nil when the channel is unknown.
-//
-// Supported channels:
-//   - claude
-//   - gemini
-//   - gemini-interactions
-//   - vertex
-//   - aistudio
-//   - codex
-//   - kimi
-//   - antigravity
-//   - xai
-//   - devin
-//   - meta
+// It returns nil when the channel is unknown. Which catalog a provider name or
+// alias reads is providerspec.ModelCatalog; this maps each catalog to its models.
 func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
-	key := strings.ToLower(strings.TrimSpace(channel))
-	switch key {
+	switch providerspec.ModelCatalog(channel) {
 	case "claude":
 		return GetClaudeModels()
 	case "gemini":
-		return GetGeminiModels()
-	case "gemini-interactions":
 		return GetGeminiModels()
 	case "vertex":
 		return GetGeminiVertexModels()
@@ -581,15 +568,15 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAIStudioModels()
 	case "codex":
 		return GetCodexProModels()
-	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
+	case "kimi":
 		return GetKimiModels()
 	case "antigravity":
 		return GetAntigravityModels()
-	case "xai", "x-ai", "grok":
+	case "xai":
 		return GetXAIModels()
 	case "devin":
 		return GetDevinModels()
-	case "meta", "muse":
+	case "meta":
 		return GetMetaModels()
 	default:
 		return nil
