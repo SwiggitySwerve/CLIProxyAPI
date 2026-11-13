@@ -14,6 +14,7 @@ import (
 	"time"
 
 	misc "github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/providerspec"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -337,16 +338,12 @@ func ResolveResponsesWebSearchCapability(routes []NativeCapabilityRoute) *bool {
 }
 
 func responsesWebSearchProviderPathSupport(provider string) *bool {
-	provider = strings.ToLower(strings.TrimSpace(provider))
-	switch provider {
-	case "codex", "xai", "claude", "antigravity":
+	switch providerspec.ResponsesWebSearch(provider) {
+	case providerspec.Supported:
 		return boolPointer(true)
-	case "openai", "openai-compatibility", "gemini", "aistudio", "vertex", "kimi", "kimi-ai", "kimi.ai", "kimi.com", "interactions", "gemini-interactions":
+	case providerspec.Unsupported:
 		return boolPointer(false)
 	default:
-		if strings.HasPrefix(provider, "openai-compatible-") {
-			return boolPointer(false)
-		}
 		return nil
 	}
 }

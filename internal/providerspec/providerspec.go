@@ -15,6 +15,15 @@ import (
 // nominal 10-day OAuth JWT expiration.
 const CodexOuterRefreshLead = 96 * time.Hour
 
+// Support is a tri-state capability answer. The zero value is unknown.
+type Support int8
+
+const (
+	SupportUnknown Support = iota
+	Supported
+	Unsupported
+)
+
 // Spec is one provider's static facts. The zero Spec is an unknown provider.
 type Spec struct {
 	// DefaultRefreshLead is the proactive refresh lead used when no
@@ -42,11 +51,21 @@ type Spec struct {
 	// NoOAuthModelAlias marks providers whose OAuth credentials have no
 	// OAuth model alias channel.
 	NoOAuthModelAlias bool
+	// ResponsesWebSearch says whether the provider's Responses path supports
+	// native web search.
+	ResponsesWebSearch Support
+	// ModelType is the model `type` that marks models this provider serves.
+	// Empty means none.
+	ModelType string
 }
+
+// openAICompatiblePrefix starts the provider name of each configured
+// OpenAI-compatible upstream.
+const openAICompatiblePrefix = "openai-compatible-"
 
 // specs is keyed by lower-case provider and never written after init.
 var specs = map[string]Spec{
-	"claude": {OAuthFlow: "anthropic", OAuthAliases: []string{"claude"}, ModelCatalog: "claude"},
+	"claude": {OAuthFlow: "anthropic", OAuthAliases: []string{"claude"}, ModelCatalog: "claude", ResponsesWebSearch: Supported},
 	"codex": {
 		DefaultRefreshLead:     CodexOuterRefreshLead,
 		InvalidGrantIsTerminal: true,
@@ -54,26 +73,43 @@ var specs = map[string]Spec{
 		OAuthFlow:              "codex",
 		OAuthAliases:           []string{"openai"},
 		ModelCatalog:           "codex",
+		ResponsesWebSearch:     Supported,
 	},
-	"gemini":              {ModelCatalog: "gemini", NoOAuthModelAlias: true},
-	"gemini-interactions": {ModelCatalog: "gemini"},
-	"vertex":              {ModelCatalog: "vertex"},
-	"aistudio":            {ModelCatalog: "aistudio"},
-	"antigravity":         {OAuthFlow: "antigravity", OAuthAliases: []string{"anti-gravity"}, ModelCatalog: "antigravity"},
+	"gemini":              {ModelCatalog: "gemini", NoOAuthModelAlias: true, ResponsesWebSearch: Unsupported},
+	"gemini-interactions": {ModelCatalog: "gemini", ResponsesWebSearch: Unsupported},
+	"interactions":        {ResponsesWebSearch: Unsupported},
+	"vertex":              {ModelCatalog: "vertex", ResponsesWebSearch: Unsupported},
+	"aistudio":            {ModelCatalog: "aistudio", ResponsesWebSearch: Unsupported},
+	"antigravity": {
+		OAuthFlow:          "antigravity",
+		OAuthAliases:       []string{"anti-gravity"},
+		ModelCatalog:       "antigravity",
+		ResponsesWebSearch: Supported,
+	},
 	"xai": {
 		OAuthFlow:           "xai",
 		OAuthAliases:        []string{"x-ai", "x.ai", "grok"},
 		ModelCatalog:        "xai",
 		ModelCatalogAliases: []string{"x-ai", "grok"},
+		ResponsesWebSearch:  Supported,
 	},
-	"devin": {OAuthFlow: "devin", OAuthAliases: []string{"cognition"}, ModelCatalog: "devin"},
+	"devin": {OAuthFlow: "devin", OAuthAliases: []string{"cognition"}, ModelCatalog: "devin", ModelType: "devin"},
 	"meta":  {OAuthFlow: "meta", OAuthAliases: []string{"muse"}, ModelCatalog: "meta", ModelCatalogAliases: []string{"muse"}},
 	"kimi": {
 		IdentitylessLogin:   true,
 		ModelCatalog:        "kimi",
 		ModelCatalogAliases: []string{"kimi.ai", "kimi.com"},
+		ResponsesWebSearch:  Unsupported,
 	},
-	"kimi-ai": {IdentitylessLogin: true, ModelCatalog: "kimi"},
+	"kimi-ai": {IdentitylessLogin: true, ModelCatalog: "kimi", ResponsesWebSearch: Unsupported},
+	// Kimi domain names as provider names: only the web-search answer is
+	// theirs; login and catalog facts stay with "kimi" above.
+	"kimi.ai":  {ResponsesWebSearch: Unsupported},
+	"kimi.com": {ResponsesWebSearch: Unsupported},
+	// "openai" here is the OpenAI-compatible provider name, not the Codex
+	// OAuth alias; its zero facts other than web search are unchanged.
+	"openai":               {ResponsesWebSearch: Unsupported},
+	"openai-compatibility": {ResponsesWebSearch: Unsupported},
 }
 
 // oauthFlows maps every accepted OAuth flow name and alias to its canonical flow.
@@ -126,6 +162,16 @@ func OAuthFlow(name string) (string, bool) {
 // catalog alias reads, or "" when there is none.
 func ModelCatalog(name string) string {
 	return modelCatalogs[key(name)]
+}
+
+// ResponsesWebSearch says whether a provider's Responses path supports native
+// web search. Every configured OpenAI-compatible upstream is unsupported.
+func ResponsesWebSearch(provider string) Support {
+	name := key(provider)
+	if strings.HasPrefix(name, openAICompatiblePrefix) {
+		return Unsupported
+	}
+	return specs[name].ResponsesWebSearch
 }
 
 // LegacyQuotaReconcileProvider returns the provider the legacy

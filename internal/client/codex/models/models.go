@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/providerspec"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 )
 
@@ -366,7 +367,7 @@ func isCodexClientDevinModel(id string, model map[string]any, entry map[string]a
 			providers = providersForModel(base)
 		}
 		for _, p := range providers {
-			if strings.EqualFold(strings.TrimSpace(p), "devin") {
+			if providerspec.For(p).ModelType == "devin" {
 				return true
 			}
 		}
