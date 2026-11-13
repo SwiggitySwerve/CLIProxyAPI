@@ -374,14 +374,34 @@ plus three provider-keyed maps. Grouped by the decision they make:
    first. Codex's oauth-settings win there because the list is served to the Codex client,
    so the rule belongs to that endpoint, not to the Codex provider; a registry field would
    name a call site. Pinned by `CodexSettingsFirst` in the Home Codex test.
-6. **Executor and transport wiring (last; may stay a switch).**
-   `sdk/cliproxy/service_executors.go:233,302-326,578`; `conductor_execution.go:480-494`
-   provider to translator format; `scheduler.go:465` and `conductor_selection.go:2577`
-   websocket preference; `selector.go:1950-1956` `canonicalLCPProvider`;
-   `sdk/api/handlers/openai/openai_responses_websocket.go:504,583,735`,
-   `openai_responses_websocket_session.go:117`, `openai_images_handlers.go:293`,
-   `openai_videos_handlers.go:157`; `sdk/cliproxy/service_plugins.go:365`;
-   `sdk/cliproxy/usage/accounting.go:347`.
+6. **Executor and transport wiring (decided: one fact moved, the rest stays as code).**
+   Moved: `PrefersWebsocket` (codex, xai) in `internal/providerspec`, read by
+   `scheduler.go` `providerPrefersWebsocketTransport`, which the scheduler and the
+   weighted selector both call. Test: `provider_transport_characterization_test.go`.
+   Left as code, with the reason:
+   - `selector.go` `preferCodexWebsocketAuths` still names `codex`. The round-robin,
+     fill-first and soonest-reset selectors' own `Pick` (the legacy path) apply the
+     preference to Codex only, while the scheduler and the weighted selector also apply
+     it to xai. That difference is upstream's; reading the field there would change
+     which xai credential those selectors pick.
+   - `conductor_selection.go` `pickNext` (`targetKey == "codex"`) is the SIWC
+     request-aware selection check, a Codex-only flow, not a transport preference.
+   - `sdk/api/handlers/openai/openai_responses_websocket.go` and
+     `openai_responses_websocket_session.go` test the same two providers (codex, xai)
+     to choose the upstream websocket path. They could read the field. Both files are
+     unchanged from upstream, and four edits there would be fork differences to carry
+     through every upstream merge; move them if a third websocket provider appears.
+   - `sdk/cliproxy/service_executors.go` (which executor to register) and
+     `conductor_execution.go` (provider to translator format) pick concrete functions
+     and formats. A registry entry for them would be a table of functions under
+     another name.
+   - Local name-mapping rules with one owner, not facts other packages share:
+     `selector.go` `canonicalLCPProvider` folds provider names into session-affinity
+     namespaces; `sdk/cliproxy/usage/accounting.go` `tokenAccountingSemanticsFor`
+     classifies token-count semantics from provider and executor names;
+     `sdk/cliproxy/service_plugins.go` expands a Kimi name to all its aliases for a
+     refresh; `openai_images_handlers.go` and `openai_videos_handlers.go` recognise the
+     xai vendor prefixes of a model name.
 7. **Config key sections (not planned).** These map a provider to its own config list
    (`claude-api-key`, `codex-api-key`, ...): `types.go:707-717`,
    `internal/api/handlers/management/config_auth_index.go:454-617`, `api_tools.go:946-962`,
@@ -394,10 +414,10 @@ plus three provider-keyed maps. Grouped by the decision they make:
    `internal/pluginhost/adapters.go:93` and `internal/auth/kimi/kimi.go:71` classify
    model families or domains.
 
-Slice order: 1, 2, 3, 4, 5, 5b, then decide on 6. Done: 1, 2, 2b, 3, 4, 5 and 5b.
-Remaining: the decision on 6. Slices 1-3 extend the unexported `providerQuota` entry in
-`sdk/cliproxy/auth` (behaviour that needs auth types); slices 4, 5 and 5b add static facts to
-the exported `internal/providerspec`, which `internal/registry` can also import.
+Slice order: 1, 2, 3, 4, 5, 5b, 6. All are done; nothing remains in roadmap 3.2.
+Slices 1-3 extend the unexported `providerQuota` entry in `sdk/cliproxy/auth` (behaviour
+that needs auth types); slices 4, 5, 5b and 6 add static facts to the exported
+`internal/providerspec`, which `internal/registry` can also import.
 
 ## Management key failures count distinct keys
 
