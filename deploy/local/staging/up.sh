@@ -12,17 +12,12 @@ flock -n 9 || die "another up.sh for staging '${NAME:-default}' is running; use 
 if pod_exists "$POD"; then guard_pod_owner; fi
 
 SRC=${1:-worktree}
-BUILD_CTX=$REPO_ROOT
 DIRTY=""
 if [ "$SRC" = worktree ]; then
   SHA=$(git -C "$REPO_ROOT" rev-parse --short=8 HEAD)
   [ -z "$(git -C "$REPO_ROOT" status --porcelain)" ] || DIRTY="-dirty"
 else
   SHA=$(git -C "$REPO_ROOT" rev-parse --verify --short=8 "$SRC^{commit}") || die "unknown git ref '$SRC'"
-  mkdir -p "$DATA_DIR/build"
-  BUILD_CTX=$(mktemp -d "$DATA_DIR/build/src.XXXXXX")
-  trap 'rm -rf "$BUILD_CTX"' EXIT
-  git -C "$REPO_ROOT" archive "$SRC" | tar -x -C "$BUILD_CTX"
 fi
 IMAGE="$IMAGE_REPO:staging-$SHA$DIRTY"
 
@@ -30,7 +25,7 @@ if [ -z "$DIRTY" ] && podman image exists "$IMAGE"; then
   echo "image $IMAGE already built"
 else
   echo "building $IMAGE from $SRC"
-  podman build -t "$IMAGE" --build-arg VERSION=staging --build-arg "COMMIT=$SHA" -f "$BUILD_CTX/Dockerfile" "$BUILD_CTX"
+  VERSION=staging "$STAGING_DIR/../bin/build-image.sh" "$SRC" "$IMAGE" 9>&-
 fi
 
 render_config
