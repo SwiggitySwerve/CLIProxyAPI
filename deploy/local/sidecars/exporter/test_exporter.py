@@ -310,6 +310,52 @@ class ExporterUsageHealth(unittest.TestCase):
         self.assertTrue(math.isnan(values['cliproxy_usage_source_last_event_age_seconds{instance="codex-primary"}']))
         self.assertIn(' NaN', m.text())
 
+    def health_values(self, data, raises=None):
+        m = self.mod.Metrics()
+        with patch.object(self.mod, 'http_ok', return_value=(True, json.dumps(data).encode())):
+            if raises:
+                with self.assertRaises(raises):
+                    self.mod.collect_usage_health(m)
+            else:
+                self.mod.collect_usage_health(m)
+        return {line[0]: line[1] for line in m.lines if isinstance(line, list)}
+
+    def test_job_outcomes_emit_only_recorded_timestamps(self):
+        data = health_payload()
+        data["jobs"] = {"import": {"last_success_seconds": 1700000100.5, "last_failure_seconds": None},
+                        "backup": {"last_success_seconds": None, "last_failure_seconds": 1700000200},
+                        "prune": {"last_success_seconds": None, "last_failure_seconds": None}}  # never ran
+        data["jobs_outcome_error"] = True
+        values = self.health_values(data)
+        self.assertEqual({k: v for k, v in values.items() if k.startswith("cliproxy_usage_job_")}, {
+            'cliproxy_usage_job_last_success_timestamp_seconds{kind="import"}': 1700000100.5,
+            'cliproxy_usage_job_last_failure_timestamp_seconds{kind="backup"}': 1700000200,
+            'cliproxy_usage_job_outcome_error': 1})
+        self.assertIn('cliproxy_usage_source_subscribed{instance="claude-primary"}', values)
+        data["jobs_outcome_error"] = False
+        self.assertEqual(self.health_values(data)['cliproxy_usage_job_outcome_error'], 0)
+
+    def test_usage_service_without_job_fields_adds_no_job_series(self):
+        values = self.health_values(health_payload())  # an older prox-usage has neither key
+        self.assertFalse(any(k.startswith("cliproxy_usage_job_") for k in values))
+        self.assertIn('cliproxy_usage_source_subscribed{instance="claude-primary"}', values)
+
+    def test_malformed_job_fields_reject_the_whole_health_block(self):
+        good = {"last_success_seconds": 1700000100, "last_failure_seconds": None}
+        cases = [("jobs", [])] + [("jobs", {"import": bad}) for bad in (
+            None, {"last_success_seconds": 1700000100},  # outcome not an object; a missing key
+            dict(good, last_success_seconds=True), dict(good, last_success_seconds="1700000100"),
+            dict(good, last_failure_seconds=-1), dict(good, last_failure_seconds=math.nan),
+            dict(good, last_failure_seconds=math.inf))] + [("jobs_outcome_error", bad) for bad in (1, "false", None)]
+        for key, bad in cases:
+            with self.subTest(key=key, bad=bad):
+                data = health_payload()
+                data["jobs"] = {"import": dict(good)}
+                data["jobs_outcome_error"] = False
+                data[key] = bad
+                # Validate-then-publish: no source or job series, only the reachability gauge.
+                self.assertEqual(set(self.health_values(data, raises=Exception)), {'cliproxy_up{service="usage"}'})
+
     def test_slow_usage_read_has_one_deadline_and_other_collectors_still_render(self):
         release = threading.Event()
         seen = []

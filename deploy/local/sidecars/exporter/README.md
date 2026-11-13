@@ -98,6 +98,15 @@ series and would go unnoticed. Two gauges make it visible:
 all are priced), and `cliproxy_usage_unpriced_model_info{provider,model,source}`
 is 1 for each such pair, for an alert's labels.
 
+The health block also carries the usage service's job outcomes when the snapshot
+has them: `cliproxy_usage_job_last_success_timestamp_seconds{kind}` and
+`cliproxy_usage_job_last_failure_timestamp_seconds{kind}` (a kind that has never
+succeeded or failed has no series, so pair an alert with `absent()`), and
+`cliproxy_usage_job_outcome_error` (0 or 1). These have no `source` label, like
+the other health series. A snapshot without the job keys adds no job series. A
+present but malformed job value rejects the whole health block for that scrape,
+source subscription included, the same validate-then-publish rule as the rest.
+
 **Rollback caveat:** reverting to the old exporter resumes its old counter
 series. CPAMP kept counting traffic while Prox series were active, so the resumed
 old-series delta includes traffic already counted by the new series: rollback
