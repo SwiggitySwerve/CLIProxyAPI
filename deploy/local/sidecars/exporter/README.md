@@ -91,6 +91,13 @@ Requested-model label strings remain unchanged even when canonical pricing uses
 a different model candidate. Cost HELP changes from "synced in the dashboard" to
 "current configured API list prices"; names, types and units remain unchanged.
 
+Nothing syncs prices any more, so a model missing from the rate book has no cost
+series and would go unnoticed. Two gauges make it visible:
+`cliproxy_usage_unpriced_models{source="prox-usage"}` is the number of distinct
+(provider, model) pairs that have requests and no price in the snapshot (0 when
+all are priced), and `cliproxy_usage_unpriced_model_info{provider,model,source}`
+is 1 for each such pair, for an alert's labels.
+
 **Rollback caveat:** reverting to the old exporter resumes its old counter
 series. CPAMP kept counting traffic while Prox series were active, so the resumed
 old-series delta includes traffic already counted by the new series: rollback

@@ -182,6 +182,7 @@ def collect_usage(m: Metrics):
     if not isinstance(data["groups"], list):
         raise ValueError("invalid prox-usage exporter groups or sources")
     samples = []
+    unpriced = set()  # (provider, model) with traffic that the rate book cannot price
 
     def add(name, kind, help_text, value, **labels):
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
@@ -194,6 +195,8 @@ def collect_usage(m: Metrics):
         if row["status"] not in ("success", "failed"):
             raise ValueError("invalid prox-usage request status")
         add("cliproxy_requests_total", "counter", "Requests through the proxy.", row["requests"], status=row["status"], **base)
+        if row["cost_usd"] is None and row["requests"] > 0:
+            unpriced.add((row["provider"], row["model"]))
         for kind in ("input", "output", "cached", "reasoning"):
             add("cliproxy_tokens_total", "counter", "Tokens by type (cached and reasoning are subsets).",
                 row["tokens"][kind], type=kind, **base)
@@ -211,6 +214,11 @@ def collect_usage(m: Metrics):
                 "What this traffic would cost at current configured API list prices.", row["cost_usd"], **base)
     add("cliproxy_last_request_timestamp_seconds", "gauge", "Time of the newest recorded request.", data["newest_event_time_seconds"])
     add("cliproxy_models_priced", "gauge", "Models with a configured price.", data["models_priced"])
+    # Nothing syncs prices any more, so a new model missing from the rate book would be silent.
+    add("cliproxy_usage_unpriced_models", "gauge", "Models with requests that the rate book cannot price.", len(unpriced))
+    for provider, model in sorted(unpriced):
+        add("cliproxy_usage_unpriced_model_info", "gauge", "1 per model with requests and no price.", 1,
+            provider=provider, model=model)
     # Validate the entire counter block before publishing any usage samples.
     for name, kind, help_text, value, labels in samples:
         m.add(name, kind, help_text, value, **labels)

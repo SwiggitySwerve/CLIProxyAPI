@@ -184,6 +184,7 @@ class ExporterUsageCounters(unittest.TestCase):
             f'cliproxy_api_equivalent_cost_usd_total{{{base}}}': 1.25,
             'cliproxy_last_request_timestamp_seconds{source="prox-usage"}': 1700000000.123,
             'cliproxy_models_priced{source="prox-usage"}': 34,
+            'cliproxy_usage_unpriced_models{source="prox-usage"}': 0,
         }
         for kind, value in (("input", 123), ("output", 45), ("cached", 6), ("reasoning", 7)):
             expected[f'cliproxy_tokens_total{{type="{kind}",{base}}}'] = value
@@ -212,6 +213,21 @@ class ExporterUsageCounters(unittest.TestCase):
         _, out = self.scrape(data)
         self.assertEqual(sum(v for k, v in out.items() if k.startswith("cliproxy_api_equivalent_cost_usd_total")), 0)
         self.assertTrue(any(k.startswith("cliproxy_api_equivalent_cost_usd_total") for k in out))
+
+    def test_unpriced_models_with_traffic_are_counted_once_and_named(self):
+        data = usage_payload()  # m1 is priced
+        for changes in (
+            dict(model="m2", cost_usd=None),
+            dict(model="m2", cost_usd=None, account="other", status="failed"),  # same model again
+            dict(model="m3", cost_usd=None, requests=0),  # no traffic: not reported
+        ):
+            row = usage_group(); row.update(changes); data["groups"].append(row)
+        m, out = self.scrape(data)
+        self.assertEqual(out['cliproxy_usage_unpriced_models{source="prox-usage"}'], 1)
+        info = {k: v for k, v in out.items() if k.startswith("cliproxy_usage_unpriced_model_info")}
+        self.assertEqual(info, {'cliproxy_usage_unpriced_model_info{provider="claude",model="m2",source="prox-usage"}': 1})
+        self.assertIn('# TYPE cliproxy_usage_unpriced_models gauge', m.text())
+        self.assertIn('# TYPE cliproxy_usage_unpriced_model_info gauge', m.text())
 
     def test_counters_are_transported_without_local_repricing_or_a_private_cache(self):
         first = usage_payload(); self.scrape(first)
