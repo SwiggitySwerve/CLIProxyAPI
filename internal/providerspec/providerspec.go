@@ -57,6 +57,9 @@ type Spec struct {
 	// ModelType is the model `type` that marks models this provider serves.
 	// Empty means none.
 	ModelType string
+	// PrefersWebsocket marks providers whose websocket-enabled credentials
+	// are picked first when the downstream connection is a websocket.
+	PrefersWebsocket bool
 }
 
 // openAICompatiblePrefix starts the provider name of each configured
@@ -74,6 +77,7 @@ var specs = map[string]Spec{
 		OAuthAliases:           []string{"openai"},
 		ModelCatalog:           "codex",
 		ResponsesWebSearch:     Supported,
+		PrefersWebsocket:       true,
 	},
 	"gemini":              {ModelCatalog: "gemini", NoOAuthModelAlias: true, ResponsesWebSearch: Unsupported},
 	"gemini-interactions": {ModelCatalog: "gemini", ResponsesWebSearch: Unsupported},
@@ -92,6 +96,7 @@ var specs = map[string]Spec{
 		ModelCatalog:        "xai",
 		ModelCatalogAliases: []string{"x-ai", "grok"},
 		ResponsesWebSearch:  Supported,
+		PrefersWebsocket:    true,
 	},
 	"devin": {OAuthFlow: "devin", OAuthAliases: []string{"cognition"}, ModelCatalog: "devin", ModelType: "devin"},
 	"meta":  {OAuthFlow: "meta", OAuthAliases: []string{"muse"}, ModelCatalog: "meta", ModelCatalogAliases: []string{"muse"}},

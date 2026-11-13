@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/providerspec"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
@@ -461,12 +462,7 @@ func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, mo
 }
 
 func providerPrefersWebsocketTransport(providerKey string) bool {
-	switch strings.ToLower(strings.TrimSpace(providerKey)) {
-	case "codex", "xai":
-		return true
-	default:
-		return false
-	}
+	return providerspec.For(providerKey).PrefersWebsocket
 }
 
 // pickMixed returns the next auth and provider for a mixed-provider request.
