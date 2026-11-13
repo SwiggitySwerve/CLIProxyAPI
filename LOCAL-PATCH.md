@@ -322,7 +322,7 @@ plus three provider-keyed maps. Grouped by the decision they make:
      (gemini skip): auth-file format parsing, each tied to that provider's file shape.
    - `sdk/cliproxy/service_auth.go` websocket teardown on removal: executor wiring
      (group 6).
-5. **Model catalog source (slice 5, done; 5b open).** `internal/providerspec` `Spec`
+5. **Model catalog source (slice 5, done; 5b done).** `internal/providerspec` `Spec`
    gained three fields:
    - `ModelCatalog` and `ModelCatalogAliases`, read through `providerspec.ModelCatalog`:
      which built-in static catalog a provider name or alias reads (`gemini-interactions`
@@ -350,15 +350,30 @@ plus three provider-keyed maps. Grouped by the decision they make:
    - `internal/registry/model_registry.go` model formatting by `"claude"`/`"gemini"`:
      handler formats, not credential providers (group 8).
    - `internal/client/codex/models/models.go` Devin detection: classifies a model by its
-     `type`, `owned_by` and id prefix (group 8), with one provider check below.
-   **Slice 5b (open).** Provider facts still written as literals:
-   - `internal/registry/model_registry.go` `responsesWebSearchProviderPathSupport`: whether
-     a provider's Responses path supports web search (yes, no, unknown), with its own
-     Kimi name family.
-   - `internal/api/server_routes.go` `formatHomeCodexModel` (a model served by Devin is
-     tagged `type: devin`) and `formatHomeCodexModelWithSettings` (Codex's OAuth settings
-     win over other providers'); `internal/client/codex/models/models.go` the same
-     Devin-provider check in `providersForModel`.
+     `type`, `owned_by` and id prefix (group 8), with one provider check (slice 5b).
+   **Slice 5b (done).** `Spec` gained two more fields:
+   - `ResponsesWebSearch` (`Supported`, `Unsupported`, unknown), read through
+     `providerspec.ResponsesWebSearch`: whether a provider's Responses path supports native
+     web search. `internal/registry` `responsesWebSearchProviderPathSupport` now only turns
+     the answer into its `*bool`. Supported: codex, xai, claude, antigravity. Unsupported:
+     gemini, gemini-interactions, interactions, aistudio, vertex, kimi, kimi-ai, openai,
+     openai-compatibility, every `openai-compatible-*` name, and `kimi.ai`/`kimi.com`, which
+     get their own entries with only this field so their login and catalog facts stay
+     with `kimi`. Other aliases (`x-ai`, `grok`, `anthropic`, `cognition`, ...) stay unknown.
+   - `ModelType` (devin): the model `type` that marks models the provider serves.
+     `internal/api/server_routes.go` `formatHomeCodexModel` tags a Home model with it, and
+     `internal/client/codex/models/models.go` `isCodexClientDevinModel` treats a model
+     served by a provider whose `ModelType` is `devin` as a Devin model. `cognition` is an
+     OAuth alias only and still does not mark a model. `formatHomeCodexModel` now trims the
+     provider name before the lookup; its only caller passes names `decodeHomeModels`
+     already trimmed and lower-cased, so the output is unchanged.
+   Tests: `internal/registry/provider_websearch_characterization_test.go`,
+   `internal/api/provider_home_codex_characterization_test.go` and
+   `internal/client/codex/models/provider_devin_characterization_test.go`.
+   Left as a switch, with the reason: `formatHomeCodexModelWithSettings` sorting `codex`
+   first. Codex's oauth-settings win there because the list is served to the Codex client,
+   so the rule belongs to that endpoint, not to the Codex provider; a registry field would
+   name a call site. Pinned by `CodexSettingsFirst` in the Home Codex test.
 6. **Executor and transport wiring (last; may stay a switch).**
    `sdk/cliproxy/service_executors.go:233,302-326,578`; `conductor_execution.go:480-494`
    provider to translator format; `scheduler.go:465` and `conductor_selection.go:2577`
@@ -379,10 +394,9 @@ plus three provider-keyed maps. Grouped by the decision they make:
    `internal/pluginhost/adapters.go:93` and `internal/auth/kimi/kimi.go:71` classify
    model families or domains.
 
-Slice order: 1, 2, 3, 4, 5, 5b, then decide on 6. Done: 1, 2, 2b, 3, 4 and 5.
-Remaining: 5b (web-search support and the Home Codex model list facts above), then the
-decision on 6. Slices 1-3 extend the unexported `providerQuota` entry in
-`sdk/cliproxy/auth` (behaviour that needs auth types); slices 4 and 5 add static facts to
+Slice order: 1, 2, 3, 4, 5, 5b, then decide on 6. Done: 1, 2, 2b, 3, 4, 5 and 5b.
+Remaining: the decision on 6. Slices 1-3 extend the unexported `providerQuota` entry in
+`sdk/cliproxy/auth` (behaviour that needs auth types); slices 4, 5 and 5b add static facts to
 the exported `internal/providerspec`, which `internal/registry` can also import.
 
 ## Management key failures count distinct keys

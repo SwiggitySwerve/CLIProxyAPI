@@ -23,6 +23,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/providerspec"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	responsesclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/responses"
@@ -830,8 +831,8 @@ func formatHomeCodexModel(entry homeModelEntry) map[string]any {
 		model["owned_by"] = entry.ownedBy
 	}
 	for _, p := range entry.providers {
-		if strings.EqualFold(p, "devin") {
-			model["type"] = "devin"
+		if modelType := providerspec.For(p).ModelType; modelType != "" {
+			model["type"] = modelType
 			break
 		}
 	}
