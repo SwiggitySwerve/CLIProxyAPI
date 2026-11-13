@@ -43,7 +43,7 @@ MIN_MEM_MB=${BUILD_MIN_MEM_MB:-6144}
 
 if [ "$SRC" = worktree ]; then
   COMMIT=$(git -C "$REPO_ROOT" rev-parse --short=8 HEAD)
-  [ -z "$(git -C "$REPO_ROOT" status --porcelain)" ] || COMMIT="$COMMIT-dirty"
+  [ -z "$(git -C "$REPO_ROOT" status --porcelain)" ] || SRC_NOTE=", with uncommitted changes"
   dockerfile=$(cat "$REPO_ROOT/Dockerfile")
 else
   COMMIT=$(git -C "$REPO_ROOT" rev-parse --verify --short=8 "$SRC^{commit}") || die "unknown git ref '$SRC'"
@@ -60,12 +60,18 @@ build_cmd=$(sed -n 's/^RUN \(.*go build .*\)$/\1/p' <<<"$dockerfile")
 [ -n "$builder_image" ] && [ "$(wc -l <<<"$builder_image")" -eq 1 ] || die "Dockerfile: expected one 'FROM <image> AS builder' line"
 [ -n "$build_cmd" ] && [ "$(wc -l <<<"$build_cmd")" -eq 1 ] || die "Dockerfile: expected one 'RUN ... go build ...' line"
 grep -qxF 'WORKDIR /app' <<<"$dockerfile" || die "Dockerfile: the builder stage no longer works in /app"
+# Every builder-stage step must be one this script reproduces or can safely skip (the
+# module download and the apt packages, which the compile here does not need).
+builder_stage=$(awk 'toupper($1) == "FROM" { inside = (tolower($NF) == "builder") } inside' <<<"$dockerfile" |
+  sed -e 's/[[:space:]]*$//' -e '/^$/d' -e '/^#/d')
+unknown_steps=$(grep -vxE 'FROM [^ ]+ AS builder|WORKDIR /app|RUN apt-get update && apt-get install [^&|;]*&& rm -rf /var/lib/apt/lists/\*|COPY go\.mod go\.sum \./|RUN go mod download|COPY \. \.|ARG (VERSION|COMMIT|BUILD_DATE)=[^ ]*|RUN [^&|;]*go build [^&|;]*' <<<"$builder_stage" || true)
+[ -z "$unknown_steps" ] || die "Dockerfile: the builder stage has a step this script does not reproduce: $(head -n1 <<<"$unknown_steps")"
 grep -qF -- '-o ./CLIProxyAPI ' <<<"$build_cmd" || die "Dockerfile: the build no longer writes ./CLIProxyAPI"
 grep -qxF 'COPY --from=builder ./app/CLIProxyAPI /CLIProxyAPI/CLIProxyAPI' <<<"$dockerfile" ||
   die "Dockerfile: the final stage no longer copies ./app/CLIProxyAPI from the builder"
 case "$builder_image" in */*) ;; *) builder_image=docker.io/library/$builder_image ;; esac
 
-echo "source:   $SRC ($COMMIT)"
+echo "source:   $SRC ($COMMIT${SRC_NOTE:-})"
 echo "image:    $IMAGE (main.Version=$VERSION)"
 echo "compile:  in $builder_image, caches and /tmp on tmpfs under $BUILD_TMP"
 echo "          $build_cmd"
