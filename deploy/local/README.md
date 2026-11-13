@@ -110,9 +110,11 @@ builder stage no longer has the shape it expects.
 Each step first waits, for up to ten minutes, until the kernel's IO pressure
 (`/proc/pressure/io`, `full avg10`) is below 5, and gives up if `full avg60` is 15 or
 more. `VERSION` sets `main.Version` (default `staging`); `BUILD_CACHE_DIR` reuses an
-existing Go cache instead of a throwaway one. The compile uses about 3 GB of
-memory under `/dev/shm` (tmpfs is memory, so check there is headroom before a build),
-and nothing is left there afterwards. `staging/up.sh` builds through
+existing Go cache instead of a throwaway one. The compile uses 1.5 to 3 GB
+of memory under `/dev/shm` and leaves nothing there afterwards. tmpfs is memory, and
+memory under pressure is swapped to disk, so the script refuses to start with less than
+6 GB available (`BUILD_MIN_MEM_MB`); on a host whose swap is on slow storage, also keep
+other tmpfs use low while it runs. `staging/up.sh` builds through
 this script.
 
 ## Roll and rollback

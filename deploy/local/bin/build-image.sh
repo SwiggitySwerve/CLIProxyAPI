@@ -15,10 +15,12 @@
 # Both steps wait for IO pressure to be low before they start. Environment:
 #   VERSION          value for main.Version (default staging)
 #   BUILD_TMP        tmpfs directory to work in (default /dev/shm); emptied afterwards.
-#                    Needs about 3 GB free; tmpfs is memory, so leave headroom.
+#                    Uses 1.5 to 3 GB. tmpfs is memory and can be swapped out, so on a
+#                    host whose swap is on slow storage keep other tmpfs use low.
 #   BUILD_CACHE_DIR  existing Go cache to reuse (with mod/ and build/); it is kept
 #   BUILD_PSI_START  start only below this `full avg10` IO pressure (default 5)
 #   BUILD_PSI_ABORT  give up at or above this `full avg60` IO pressure (default 15)
+#   BUILD_MIN_MEM_MB require this much available memory before compiling (default 6144)
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/../staging/lib.sh"
 
@@ -37,6 +39,7 @@ IMAGE=${ARGS[1]}
 BUILD_TMP=${BUILD_TMP:-/dev/shm}
 PSI_START=${BUILD_PSI_START:-5}
 PSI_ABORT=${BUILD_PSI_ABORT:-15}
+MIN_MEM_MB=${BUILD_MIN_MEM_MB:-6144}
 
 if [ "$SRC" = worktree ]; then
   COMMIT=$(git -C "$REPO_ROOT" rev-parse --short=8 HEAD)
@@ -70,6 +73,9 @@ echo "assemble: podman build with the builder stage replaced by the compiled bin
 [ "$DRY_RUN" = 0 ] || { echo "dry-run: nothing was built"; exit 0; }
 
 [ "$(stat -f -c %T "$BUILD_TMP")" = tmpfs ] || die "BUILD_TMP=$BUILD_TMP is not on tmpfs"
+# tmpfs is memory, and memory under pressure is swapped to disk: that is IO again.
+mem_free_mb=$(awk '$1 == "MemAvailable:" { print int($2 / 1024) }' /proc/meminfo)
+[ "$mem_free_mb" -ge "$MIN_MEM_MB" ] || die "only $mem_free_mb MB of memory available, need $MIN_MEM_MB (BUILD_MIN_MEM_MB) to compile on tmpfs"
 
 psi() { awk -v f="$1" '$1 == "full" { for (i = 2; i <= NF; i++) { split($i, kv, "="); if (kv[1] == f) print kv[2] } }' /proc/pressure/io; }
 at_least() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a >= b) }'; }
