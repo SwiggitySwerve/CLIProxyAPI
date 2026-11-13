@@ -14,7 +14,8 @@
 #
 # Both steps wait for IO pressure to be low before they start. Environment:
 #   VERSION          value for main.Version (default staging)
-#   BUILD_TMP        tmpfs directory to work in (default /dev/shm); emptied afterwards
+#   BUILD_TMP        tmpfs directory to work in (default /dev/shm); emptied afterwards.
+#                    Needs about 3 GB free; tmpfs is memory, so leave headroom.
 #   BUILD_CACHE_DIR  existing Go cache to reuse (with mod/ and build/); it is kept
 #   BUILD_PSI_START  start only below this `full avg10` IO pressure (default 5)
 #   BUILD_PSI_ABORT  give up at or above this `full avg60` IO pressure (default 15)
@@ -101,10 +102,11 @@ else
 fi
 
 io_gate "compile"
-ionice -c3 nice -n10 podman run --rm --tmpfs /tmp:rw,exec,size=6g \
+ionice -c3 nice -n10 podman run --rm --tmpfs /tmp:rw,exec,size=3g \
   -v "$APP":/app -w /app -v "$CACHE/mod":/go/pkg/mod -v "$CACHE/build":/root/.cache/go-build \
   -e VERSION -e COMMIT -e BUILD_DATE "$builder_image" sh -euc "$build_cmd"
 [ -x "$APP/CLIProxyAPI" ] || die "the compile step did not produce $APP/CLIProxyAPI"
+echo "compiled; tmpfs in use: $(du -shc "$WORK" "$CACHE" 2>/dev/null | tail -1 | cut -f1)"
 
 io_gate "assemble the image"
 ionice -c3 nice -n10 podman build -q -t "$IMAGE" -f "$APP/Dockerfile" --build-context "builder=$WORK/builder" \
