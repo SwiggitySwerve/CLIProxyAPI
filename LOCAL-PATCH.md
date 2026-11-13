@@ -386,14 +386,22 @@ plus three provider-keyed maps. Grouped by the decision they make:
      which xai credential those selectors pick.
    - `conductor_selection.go` `pickNext` (`targetKey == "codex"`) is the SIWC
      request-aware selection check, a Codex-only flow, not a transport preference.
-   - `sdk/cliproxy/service_executors.go`; `conductor_execution.go` provider to
-     translator format; `selector.go` `canonicalLCPProvider`;
-     `sdk/api/handlers/openai/openai_responses_websocket.go`,
-     `openai_responses_websocket_session.go`, `openai_images_handlers.go`,
-     `openai_videos_handlers.go`; `sdk/cliproxy/service_plugins.go`;
-     `sdk/cliproxy/usage/accounting.go`: each picks a concrete executor, translator
-     format or handler path. A registry entry for them would be a table of functions
-     under another name.
+   - `sdk/api/handlers/openai/openai_responses_websocket.go` and
+     `openai_responses_websocket_session.go` test the same two providers (codex, xai)
+     to choose the upstream websocket path. They could read the field. Both files are
+     unchanged from upstream, and four edits there would be fork differences to carry
+     through every upstream merge; move them if a third websocket provider appears.
+   - `sdk/cliproxy/service_executors.go` (which executor to register) and
+     `conductor_execution.go` (provider to translator format) pick concrete functions
+     and formats. A registry entry for them would be a table of functions under
+     another name.
+   - Local name-mapping rules with one owner, not facts other packages share:
+     `selector.go` `canonicalLCPProvider` folds provider names into session-affinity
+     namespaces; `sdk/cliproxy/usage/accounting.go` `tokenAccountingSemanticsFor`
+     classifies token-count semantics from provider and executor names;
+     `sdk/cliproxy/service_plugins.go` expands a Kimi name to all its aliases for a
+     refresh; `openai_images_handlers.go` and `openai_videos_handlers.go` recognise the
+     xai vendor prefixes of a model name.
 7. **Config key sections (not planned).** These map a provider to its own config list
    (`claude-api-key`, `codex-api-key`, ...): `types.go:707-717`,
    `internal/api/handlers/management/config_auth_index.go:454-617`, `api_tools.go:946-962`,
