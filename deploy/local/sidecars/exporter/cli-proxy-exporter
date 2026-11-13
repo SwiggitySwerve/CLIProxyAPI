@@ -2,9 +2,9 @@
 """Prometheus exporter for the CLIProxyAPI subscription proxy.
 
 Everything is computed at scrape time from local sources, read-only:
-  - CPA-Manager-Plus usage DB (~/.local/share/cpa-manager-plus/usage.sqlite):
-    requests / tokens / latency / API-equivalent cost per provider, model,
-    account and client key (label from the dashboard's API key aliases).
+  - prox-usage GET /v1/exporter: canonical lifetime usage at the same current rates
+    as Prox analytics, with source="prox-usage" and the existing label values.
+  - prox-usage source subscription and event age: additive health without a source label.
   - CLIProxyAPI management API (GET /credentials on each instance): the proxy's own
     state per credential (available / cooling / unavailable / disabled, next_retry_after,
     per-model cooldowns, quota signals and their age), labelled by instance and auth_index.
@@ -21,7 +21,6 @@ import json
 import math
 import os
 import re
-import sqlite3
 import sys
 import threading
 import time
@@ -31,7 +30,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 HOME = Path.home()
-DB = HOME / ".local/share/cpa-manager-plus/usage.sqlite"
 STATE = HOME / ".local/share/cli-proxy-rerank/state.json"
 PLANS = HOME / ".config/cli-proxy-rerank/plans.json"
 MGMT_KEY = (HOME / ".config/cli-proxy-rerank/management-key").read_text().strip()
@@ -48,6 +46,7 @@ BUILTIN_INSTANCES = [
 EXPORTER_FILE = Path(os.environ.get("CLI_PROXY_EXPORTER_CONFIG") or HOME / ".config/cli-proxy/exporter.json")
 DASHBOARD = "http://127.0.0.1:18317"
 USAGE = "http://127.0.0.1:18320"
+USAGE_SOURCE = "prox-usage"  # Bump on any later counter-decreasing price change.
 USAGE_DEADLINE_SECONDS = 4
 _usage_http_gate = threading.Semaphore(1)
 # Anthropic reports some limits under internal codenames; same labels as the dashboard.
@@ -95,7 +94,7 @@ class Metrics:
         self.usage_response = None  # at most one bounded Prox request per scrape
         self.creds = None  # GET /credentials result, fetched once per scrape
 
-    def add(self, name, kind, help_text, value, **labels):
+    def add(self, name, kind, help_text, value, /, **labels):  # positional-only: a label may be called kind
         if name not in self.declared:
             self.lines.append(f"# HELP {name} {help_text}")
             self.lines.append(f"# TYPE {name} {kind}")
@@ -147,6 +146,30 @@ def fetch_usage(m: Metrics):
     return m.usage_response
 
 
+def usage_job_outcomes(data):
+    """Job samples and the service's own error flag (None when absent); raises when malformed.
+    Job outcomes are newer than the rest: an older prox-usage has neither key, and that is fine."""
+    samples = []
+    if "jobs" in data:
+        if not isinstance(data["jobs"], dict):
+            raise ValueError("invalid prox-usage job outcomes")
+        for kind, outcome in sorted(data["jobs"].items()):
+            if not isinstance(outcome, dict):
+                raise ValueError("invalid prox-usage job outcome")
+            for result in ("success", "failure"):
+                at = outcome[f"last_{result}_seconds"]
+                if at is None:
+                    continue  # never happened: no series, so alerts pair it with absent()
+                if isinstance(at, bool) or not isinstance(at, (int, float)) or not math.isfinite(at) or at < 0:
+                    raise ValueError("invalid prox-usage job outcome time")
+                samples.append((result, kind, at))
+    if "jobs_outcome_error" not in data:
+        return samples, None
+    if not isinstance(data["jobs_outcome_error"], bool):
+        raise ValueError("invalid prox-usage job outcome error flag")
+    return samples, data["jobs_outcome_error"]
+
+
 def collect_usage_health(m: Metrics):
     ok, body = fetch_usage(m)
     m.add("cliproxy_up", "gauge", "Service reachable.", int(ok), service="usage")
@@ -170,156 +193,71 @@ def collect_usage_health(m: Metrics):
         m.add("cliproxy_usage_source_last_event_age_seconds", "gauge",
               "Seconds since this collector received an event; NaN until first event.",
               math.nan if age is None else age, instance=instance)
-
-
-def load_prices(db):
-    """Effective (input, output, cache read, cache write) $/1M per model, per context tier
-    and for each service tier (priority/fast, ultrafast). Tier rows override only their configured fields; unset cache
-    read falls back to the cache price or 10% of input, unset cache write to input (the
-    dashboard's pricing rules)."""
-    def effective(base, row=None):
-        b_in, b_out, b_cache, b_cread, b_ccreate, b_cread_ok, b_ccreate_ok = base
-        if row:
-            r_in, r_out, r_cache, r_cread, r_ccreate, in_ok, out_ok, cache_ok, cread_ok, ccreate_ok = row
-            b_in = r_in if in_ok else b_in
-            b_out = r_out if out_ok else b_out
-            b_cache = r_cache if cache_ok else b_cache
-            b_cread, b_cread_ok = (r_cread, True) if cread_ok else (b_cread, b_cread_ok)
-            b_ccreate, b_ccreate_ok = (r_ccreate, True) if ccreate_ok else (b_ccreate, b_ccreate_ok)
-        b_in, b_out = b_in or 0, b_out or 0
-        cread = b_cread if b_cread_ok else (b_cache or b_in * 0.1)
-        ccreate = b_ccreate if b_ccreate_ok else b_in
-        return (b_in, b_out, cread or 0, ccreate or 0)
-
-    base = {r[0]: r[1:] for r in db.execute(
-        "SELECT model, prompt_per_1m, completion_per_1m, cache_per_1m, cache_read_per_1m, cache_creation_per_1m, "
-        "cache_read_configured, cache_creation_configured FROM model_prices")}
-    tier_cols = ("prompt_per_1m, completion_per_1m, cache_per_1m, cache_read_per_1m, cache_creation_per_1m, "
-                 "prompt_configured, completion_configured, cache_configured, cache_read_configured, "
-                 "cache_creation_configured")
-    prices = {model: effective(b) for model, b in base.items()}
-    context = {(r[0], r[1]): effective(base[r[0]], r[2:]) for r in db.execute(
-        f"SELECT model, threshold_tokens, {tier_cols} FROM model_price_context_tiers") if r[0] in base}
-    tiers = {}
-    for r in db.execute(f"SELECT model, mode, service_tier, {tier_cols} FROM model_price_service_tiers"):
-        if r[0] in base:
-            for name in (r[1], r[2]):
-                if name:
-                    tiers[(r[0], name.strip().lower())] = effective(base[r[0]], r[3:])
-    return prices, context, tiers
-
-
-# Usage counters are running sums over usage_events, folded in by id. Re-aggregating the whole
-# table each scrape (~800k rows) spilled a temp B-tree to disk every time: ~230 MB written per
-# scrape, on a host whose QLC-backed pool stalls under sustained writes. The sums are rebuilt
-# from scratch only when existing rows can have changed under them: the cache-accounting
-# migration rewrites token columns, and context-tier thresholds decide each row's price band.
-# Rows CPA-Manager-Plus archives (deletes) stay counted, so the counters never drop.
-_usage = {"key": None, "last_id": 0, "groups": {}}
-_usage_lock = threading.Lock()
-
-
-# Each event is priced by its band, as the dashboard does: a request whose total input
-# (cached included) is above a model's context-tier threshold (e.g. >272K) uses that
-# tier's rates; otherwise the stored service tier (priority/fast, ultrafast)
-# selects its own price row. Legacy "-fast" aliases kept the
-# client's tier, so the name suffix also selects priority for their historical events.
-USAGE_GROUPS_SQL = """
-    SELECT provider, COALESCE(NULLIF(requested_model,''), model) AS req_model,
-           COALESCE(NULLIF(resolved_model,''), model) AS billing_model,
-           COALESCE(NULLIF(account_snapshot,''), auth_label_snapshot, auth_index) AS account,
-           api_key_hash, failed,
-           COUNT(*), SUM(input_tokens), SUM(output_tokens), SUM(cached_tokens), SUM(reasoning_tokens),
-           SUM(total_tokens), SUM(normalized_uncached_input_tokens), SUM(normalized_cache_read_tokens),
-           SUM(normalized_cache_creation_tokens), SUM(latency_ms),
-           SUM(CASE WHEN ttft_ms > 0 THEN ttft_ms ELSE 0 END), SUM(CASE WHEN ttft_ms > 0 THEN 1 ELSE 0 END),
-           SUM(CASE WHEN failed=0 AND total_tokens=0 THEN 1 ELSE 0 END), MAX(timestamp_ms),
-           LOWER(TRIM(COALESCE(service_tier, ''))) AS tier,
-           COALESCE((SELECT MAX(t.threshold_tokens) FROM model_price_context_tiers t
-                     WHERE t.model IN (NULLIF(e.resolved_model, ''), e.model)
-                       AND COALESCE(e.normalized_total_input_tokens, e.input_tokens, 0) > t.threshold_tokens),
-                    0) AS context_band
-    FROM usage_events e WHERE e.id > ? AND e.id <= ?
-    GROUP BY 1,2,3,4,5,6,tier,context_band"""
-
-
-def usage_cache_key(db):
-    tiers = db.execute("SELECT model, threshold_tokens FROM model_price_context_tiers ORDER BY 1, 2").fetchall()
-    migrations = db.execute(
-        "SELECT name, status, applied_rows, updated_at_ms FROM usage_data_migrations"
-        " WHERE name LIKE 'usage_cache_accounting%' ORDER BY name").fetchall() \
-        if db.execute("SELECT 1 FROM sqlite_master WHERE name='usage_data_migrations'").fetchone() else []
-    return tuple(tiers), tuple(migrations)
+    # A bad job field must never hide source health: the job block is its own
+    # all-or-nothing unit. Malformed means no job times and the error flag raised.
+    try:
+        job_samples, outcome_error = usage_job_outcomes(data)
+    except (KeyError, ValueError):
+        job_samples, outcome_error = [], True
+    for result, kind, at in job_samples:
+        m.add(f"cliproxy_usage_job_last_{result}_timestamp_seconds", "gauge",
+              f"Time of this usage job's last {result}; no series until it has one.", at, kind=kind)
+    if outcome_error is not None:
+        m.add("cliproxy_usage_job_outcome_error", "gauge",
+              "1 when the usage service's job outcomes could not be read.", int(outcome_error))
 
 
 def collect_usage(m: Metrics):
-    db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True, timeout=5)
-    try:
-        # A full pass (first scrape, or after a rebuild) sorts in memory instead of temp files.
-        db.execute("PRAGMA temp_store=MEMORY")
-        aliases = dict(db.execute("SELECT api_key_hash, alias FROM api_key_aliases").fetchall()) \
-            if db.execute("SELECT 1 FROM sqlite_master WHERE name='api_key_aliases'").fetchone() else {}
-        prices, context_prices, tier_prices = load_prices(db)
-        with _usage_lock:
-            key = usage_cache_key(db)
-            max_id = db.execute("SELECT COALESCE(MAX(id), 0) FROM usage_events").fetchone()[0]
-            if key != _usage["key"] or max_id < _usage["last_id"]:
-                _usage.update(key=key, last_id=0, groups={})
-            if max_id > _usage["last_id"]:
-                # fetchall before merging: a query that fails part-way must not leave half the
-                # rows folded in, or the next scrape would count them twice.
-                for r in db.execute(USAGE_GROUPS_SQL, (_usage["last_id"], max_id)).fetchall():
-                    group = r[:6] + r[20:]  # provider .. failed, tier, context_band
-                    new = [v or 0 for v in r[6:19]] + [r[19] or 0]
-                    old = _usage["groups"].get(group)
-                    _usage["groups"][group] = new if old is None else \
-                        [a + b for a, b in zip(old[:13], new[:13])] + [max(old[13], new[13])]
-                _usage["last_id"] = max_id
-            rows = [g[:6] + tuple(v) + g[6:] for g, v in _usage["groups"].items()]
-        last_event = 0
-        for (prov, req_model, billing_model, account, key_hash, failed, calls, tin, tout, tcached, treason, ttotal,
-             n_uncached, n_cache_read, n_cache_create, lat, ttft, ttft_n, zero, last_ts, tier,
-             context_band) in rows:
-            client = aliases.get(key_hash) or (f"key {key_hash[:8]}" if key_hash else "unknown")
-            base = dict(provider=prov, model=req_model, account=account, client=client)
-            status = "failed" if failed else "success"
-            m.add("cliproxy_requests_total", "counter", "Requests through the proxy.", calls, status=status, **base)
-            for kind, val in (("input", tin), ("output", tout), ("cached", tcached), ("reasoning", treason)):
-                m.add("cliproxy_tokens_total", "counter", "Tokens by type (cached and reasoning are subsets).",
-                      val or 0, type=kind, **base)
-            m.add("cliproxy_latency_seconds_sum", "counter", "Summed end-to-end request latency.", (lat or 0) / 1000, **base)
-            # TTFT sum and count share one filter (ttft_ms > 0) so sum/count is a true average.
-            m.add("cliproxy_ttft_seconds_sum", "counter", "Summed time to first token.", (ttft or 0) / 1000, **base)
-            m.add("cliproxy_ttft_seconds_count", "counter", "Requests with a time to first token recorded.",
-                  ttft_n or 0, **base)
-            # Normalized per provider: Claude cache_creation_input_tokens are the cache writes.
-            for kind, val in (("read", n_cache_read), ("write", n_cache_create)):
-                m.add("cliproxy_cache_tokens_total", "counter", "Prompt-cache tokens read and written.",
-                      val or 0, type=kind, **base)
-            m.add("cliproxy_latency_seconds_count", "counter", "Requests with latency recorded.", calls, **base)
-            m.add("cliproxy_zero_token_success_total", "counter",
-                  "Successful requests recorded with 0 tokens (accounting gap).", zero or 0, **base)
-            # Bill the model that served the request (aliases record their target here).
-            base_model = billing_model
-            price = None
-            if context_band:
-                price = context_prices.get((base_model, context_band))
-            elif tier:
-                price = tier_prices.get((base_model, tier))
-            if not price and not context_band and req_model.endswith("-fast"):
-                price = tier_prices.get((base_model, "priority"))
-            price = price or prices.get(base_model)
-            if price:
-                p_in, p_out, p_cread, p_ccreate = price
-                cost = ((n_uncached or 0) * p_in + (tout or 0) * p_out +
-                        (n_cache_read or 0) * p_cread + (n_cache_create or 0) * p_ccreate) / 1e6
-                m.add("cliproxy_api_equivalent_cost_usd_total", "counter",
-                      "What this traffic would cost at API list prices (synced in the dashboard).", cost, **base)
-            last_event = max(last_event, last_ts or 0)
-        m.add("cliproxy_last_request_timestamp_seconds", "gauge", "Time of the newest recorded request.", last_event / 1000)
-        m.add("cliproxy_models_priced", "gauge", "Models with a configured price.", len(prices))
-    finally:
-        db.close()
+    # The writer owns folding, aliases and pricing. One authenticated read, no local cache or SQL.
+    ok, body = fetch_usage(m)
+    if not ok:
+        raise RuntimeError("prox-usage exporter unavailable")
+    data = json.loads(body)
+    if data["schema_version"] != 1 or data["rate_book_loaded"] is not True or data["client_aliases_loaded"] is not True:
+        raise ValueError("prox-usage exporter is not ready for counter cutover")
+    if not isinstance(data["groups"], list):
+        raise ValueError("invalid prox-usage exporter groups or sources")
+    samples = []
+    unpriced = set()  # (provider, model) with traffic that the rate book cannot price
+
+    def add(name, kind, help_text, value, **labels):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError("invalid prox-usage exporter measurement")
+        labels["source"] = USAGE_SOURCE
+        samples.append((name, kind, help_text, value, labels))
+
+    for row in data["groups"]:
+        base = dict(provider=row["provider"], model=row["model"], account=row["account"], client=row["client"])
+        if row["status"] not in ("success", "failed"):
+            raise ValueError("invalid prox-usage request status")
+        add("cliproxy_requests_total", "counter", "Requests through the proxy.", row["requests"], status=row["status"], **base)
+        if row["cost_usd"] is None and row["requests"] > 0:
+            unpriced.add((row["provider"], row["model"]))
+        for kind in ("input", "output", "cached", "reasoning"):
+            add("cliproxy_tokens_total", "counter", "Tokens by type (cached and reasoning are subsets).",
+                row["tokens"][kind], type=kind, **base)
+        add("cliproxy_latency_seconds_sum", "counter", "Summed end-to-end request latency.", row["latency_seconds_sum"], **base)
+        add("cliproxy_ttft_seconds_sum", "counter", "Summed time to first token.", row["ttft_seconds_sum"], **base)
+        add("cliproxy_ttft_seconds_count", "counter", "Requests with a time to first token recorded.", row["ttft_seconds_count"], **base)
+        for kind in ("read", "write"):
+            add("cliproxy_cache_tokens_total", "counter", "Prompt-cache tokens read and written.",
+                row["cache"][kind], type=kind, **base)
+        add("cliproxy_latency_seconds_count", "counter", "Requests with latency recorded.", row["latency_seconds_count"], **base)
+        add("cliproxy_zero_token_success_total", "counter",
+            "Successful requests recorded with 0 tokens (accounting gap).", row["zero_token_success"], **base)
+        if row["cost_usd"] is not None:
+            add("cliproxy_api_equivalent_cost_usd_total", "counter",
+                "What this traffic would cost at current configured API list prices.", row["cost_usd"], **base)
+    add("cliproxy_last_request_timestamp_seconds", "gauge", "Time of the newest recorded request.", data["newest_event_time_seconds"])
+    add("cliproxy_models_priced", "gauge", "Models with a configured price.", data["models_priced"])
+    # Nothing syncs prices any more, so a new model missing from the rate book would be silent.
+    add("cliproxy_usage_unpriced_models", "gauge", "Models with requests that the rate book cannot price.", len(unpriced))
+    for provider, model in sorted(unpriced):
+        add("cliproxy_usage_unpriced_model_info", "gauge", "1 per model with requests and no price.", 1,
+            provider=provider, model=model)
+    # Validate the entire counter block before publishing any usage samples.
+    for name, kind, help_text, value, labels in samples:
+        m.add(name, kind, help_text, value, **labels)
 
 
 def collect_quota(m: Metrics):

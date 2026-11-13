@@ -1,0 +1,59 @@
+# Proposed addition to swervebox/kubernetes/apps/cli-proxy-api/tests/exporter-rules.test.yaml.
+# The coordinator lands this there. rule_files resolves the extracted PrometheusRule spec.
+rule_files:
+  - rules.yaml
+evaluation_interval: 1m
+tests:
+  - name: usage source identity changes without an E0 spike
+    interval: 5m
+    input_series:
+      # 6,000 tok/s baseline for a week. Old counters end at 167h; new counters
+      # start at 167h5m with very large lifetime totals, then the same steady rate.
+      - series: 'cliproxy_tokens_total{client="SwapClient",type="input",provider="claude",account="SwapAccount",model="model"}'
+        values: '0+1800000x2004 stale _x11'
+      - series: 'cliproxy_tokens_total{client="SwapClient",type="input",provider="claude",account="SwapAccount",model="model",source="prox-usage"}'
+        values: '_x2005 9000000000+1800000x11'
+      - series: 'cliproxy_requests_total{client="SwapClient",account="SwapAccount",provider="claude",model="model",status="success"}'
+        values: '0+120x2004 stale _x11'
+      - series: 'cliproxy_requests_total{client="SwapClient",account="SwapAccount",provider="claude",model="model",status="success",source="prox-usage"}'
+        values: '_x2005 90000000+120x11'
+      - series: 'cliproxy_requests_total{client="SwapClient",account="SwapAccount",provider="claude",model="model",status="failed"}'
+        values: '0+6x2004 stale _x11'
+      - series: 'cliproxy_requests_total{client="SwapClient",account="SwapAccount",provider="claude",model="model",status="failed",source="prox-usage"}'
+        values: '_x2005 900000000+6x11'
+    alert_rule_test:
+      - eval_time: 167h10m
+        alertname: CliProxyClientTokenRateHigh
+        exp_alerts: []
+      - eval_time: 167h30m
+        alertname: CliProxyClientTokenRateHigh
+        exp_alerts: []
+      - eval_time: 168h
+        alertname: CliProxyClientTokenRateHigh
+        exp_alerts: []
+      - eval_time: 167h10m
+        alertname: CliProxyAccountFailureSpike
+        exp_alerts: []
+      - eval_time: 167h30m
+        alertname: CliProxyAccountFailureSpike
+        exp_alerts: []
+      - eval_time: 168h
+        alertname: CliProxyAccountFailureSpike
+        exp_alerts: []
+      - eval_time: 167h30m
+        alertname: CliProxyHighFailureRate
+        exp_alerts: []
+      - eval_time: 168h
+        alertname: CliProxyHighFailureRate
+        exp_alerts: []
+    promql_expr_test:
+      - expr: 'sum by (client) (rate(cliproxy_tokens_total{type=~"input|output"}[15m]))'
+        eval_time: 168h
+        exp_samples:
+          - labels: '{client="SwapClient"}'
+            value: 6000
+      - expr: 'sum by (account) (increase(cliproxy_requests_total[10m]))'
+        eval_time: 168h
+        exp_samples:
+          - labels: '{account="SwapAccount"}'
+            value: 252
