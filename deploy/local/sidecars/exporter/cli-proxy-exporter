@@ -146,6 +146,30 @@ def fetch_usage(m: Metrics):
     return m.usage_response
 
 
+def usage_job_outcomes(data):
+    """Job samples and the service's own error flag (None when absent); raises when malformed.
+    Job outcomes are newer than the rest: an older prox-usage has neither key, and that is fine."""
+    samples = []
+    if "jobs" in data:
+        if not isinstance(data["jobs"], dict):
+            raise ValueError("invalid prox-usage job outcomes")
+        for kind, outcome in sorted(data["jobs"].items()):
+            if not isinstance(outcome, dict):
+                raise ValueError("invalid prox-usage job outcome")
+            for result in ("success", "failure"):
+                at = outcome[f"last_{result}_seconds"]
+                if at is None:
+                    continue  # never happened: no series, so alerts pair it with absent()
+                if isinstance(at, bool) or not isinstance(at, (int, float)) or not math.isfinite(at) or at < 0:
+                    raise ValueError("invalid prox-usage job outcome time")
+                samples.append((result, kind, at))
+    if "jobs_outcome_error" not in data:
+        return samples, None
+    if not isinstance(data["jobs_outcome_error"], bool):
+        raise ValueError("invalid prox-usage job outcome error flag")
+    return samples, data["jobs_outcome_error"]
+
+
 def collect_usage_health(m: Metrics):
     ok, body = fetch_usage(m)
     m.add("cliproxy_up", "gauge", "Service reachable.", int(ok), service="usage")
@@ -163,36 +187,24 @@ def collect_usage_health(m: Metrics):
                                 not math.isfinite(age) or age < 0):
             raise ValueError("invalid prox-usage event age")
         samples.append((source["instance"], source["subscribed"], age))
-    # Job outcomes are newer than the rest: an older prox-usage has neither key, and that
-    # is not an error. A present but malformed value rejects the whole health block.
-    job_samples = []
-    if "jobs" in data:
-        if not isinstance(data["jobs"], dict):
-            raise ValueError("invalid prox-usage job outcomes")
-        for kind, outcome in sorted(data["jobs"].items()):
-            if not isinstance(outcome, dict):
-                raise ValueError("invalid prox-usage job outcome")
-            for result in ("success", "failure"):
-                at = outcome[f"last_{result}_seconds"]
-                if at is None:
-                    continue  # never happened: no series, so alerts pair it with absent()
-                if isinstance(at, bool) or not isinstance(at, (int, float)) or not math.isfinite(at) or at < 0:
-                    raise ValueError("invalid prox-usage job outcome time")
-                job_samples.append((result, kind, at))
-    if "jobs_outcome_error" in data and not isinstance(data["jobs_outcome_error"], bool):
-        raise ValueError("invalid prox-usage job outcome error flag")
     for instance, subscribed, age in samples:
         m.add("cliproxy_usage_source_subscribed", "gauge", "1 when the usage source is subscribed.",
               int(subscribed), instance=instance)
         m.add("cliproxy_usage_source_last_event_age_seconds", "gauge",
               "Seconds since this collector received an event; NaN until first event.",
               math.nan if age is None else age, instance=instance)
+    # A bad job field must never hide source health: the job block is its own
+    # all-or-nothing unit. Malformed means no job times and the error flag raised.
+    try:
+        job_samples, outcome_error = usage_job_outcomes(data)
+    except (KeyError, ValueError):
+        job_samples, outcome_error = [], True
     for result, kind, at in job_samples:
         m.add(f"cliproxy_usage_job_last_{result}_timestamp_seconds", "gauge",
               f"Time of this usage job's last {result}; no series until it has one.", at, kind=kind)
-    if "jobs_outcome_error" in data:
+    if outcome_error is not None:
         m.add("cliproxy_usage_job_outcome_error", "gauge",
-              "1 when the usage service could not read its job outcomes.", int(data["jobs_outcome_error"]))
+              "1 when the usage service's job outcomes could not be read.", int(outcome_error))
 
 
 def collect_usage(m: Metrics):

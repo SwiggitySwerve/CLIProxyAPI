@@ -103,9 +103,11 @@ has them: `cliproxy_usage_job_last_success_timestamp_seconds{kind}` and
 `cliproxy_usage_job_last_failure_timestamp_seconds{kind}` (a kind that has never
 succeeded or failed has no series, so pair an alert with `absent()`), and
 `cliproxy_usage_job_outcome_error` (0 or 1). These have no `source` label, like
-the other health series. A snapshot without the job keys adds no job series. A
-present but malformed job value rejects the whole health block for that scrape,
-source subscription included, the same validate-then-publish rule as the rest.
+the other health series. A snapshot without the job keys adds no job series.
+The job block is validated on its own, after source health is published: a
+present but malformed job value publishes no job times and sets
+`cliproxy_usage_job_outcome_error` to 1, and never hides source subscription
+or event age. A malformed source entry still rejects the health block.
 
 **Rollback caveat:** reverting to the old exporter resumes its old counter
 series. CPAMP kept counting traffic while Prox series were active, so the resumed

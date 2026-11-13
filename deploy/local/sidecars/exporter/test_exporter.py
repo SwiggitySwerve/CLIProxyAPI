@@ -340,9 +340,9 @@ class ExporterUsageHealth(unittest.TestCase):
         self.assertFalse(any(k.startswith("cliproxy_usage_job_") for k in values))
         self.assertIn('cliproxy_usage_source_subscribed{instance="claude-primary"}', values)
 
-    def test_malformed_job_fields_reject_the_whole_health_block(self):
+    def test_malformed_job_fields_keep_source_health_and_raise_the_flag(self):
         good = {"last_success_seconds": 1700000100, "last_failure_seconds": None}
-        cases = [("jobs", [])] + [("jobs", {"import": bad}) for bad in (
+        cases = [("jobs", []), ("jobs", None)] + [("jobs", {"import": bad}) for bad in (
             None, {"last_success_seconds": 1700000100},  # outcome not an object; a missing key
             dict(good, last_success_seconds=True), dict(good, last_success_seconds="1700000100"),
             dict(good, last_failure_seconds=-1), dict(good, last_failure_seconds=math.nan),
@@ -350,11 +350,23 @@ class ExporterUsageHealth(unittest.TestCase):
         for key, bad in cases:
             with self.subTest(key=key, bad=bad):
                 data = health_payload()
-                data["jobs"] = {"import": dict(good)}
+                data["jobs"] = {"import": dict(good), "backup": dict(good)}
                 data["jobs_outcome_error"] = False
                 data[key] = bad
-                # Validate-then-publish: no source or job series, only the reachability gauge.
-                self.assertEqual(set(self.health_values(data, raises=Exception)), {'cliproxy_up{service="usage"}'})
+                values = self.health_values(data)  # does not raise: source health is independent
+                self.assertEqual(values['cliproxy_usage_source_subscribed{instance="claude-primary"}'], 1)
+                self.assertEqual(values['cliproxy_usage_source_subscribed{instance="codex-primary"}'], 0)
+                self.assertEqual(values['cliproxy_usage_source_last_event_age_seconds{instance="claude-primary"}'], 1.5)
+                # The job block is all-or-nothing: no timestamps, and the failure is visible.
+                self.assertEqual({k: v for k, v in values.items() if k.startswith("cliproxy_usage_job_")},
+                                 {'cliproxy_usage_job_outcome_error': 1})
+
+    def test_malformed_source_entry_still_rejects_the_health_block(self):
+        data = health_payload()
+        data["jobs"] = {"import": {"last_success_seconds": 1700000100, "last_failure_seconds": None}}
+        data["jobs_outcome_error"] = False
+        data["sources"][0]["subscribed"] = "yes"
+        self.assertEqual(set(self.health_values(data, raises=ValueError)), {'cliproxy_up{service="usage"}'})
 
     def test_slow_usage_read_has_one_deadline_and_other_collectors_still_render(self):
         release = threading.Event()
