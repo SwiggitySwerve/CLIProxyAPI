@@ -4,7 +4,11 @@ The additive health PR (#51) keeps CPAMP counters during the dual run. This PR i
 the later swap: one authenticated `GET http://127.0.0.1:18320/v1/exporter` supplies
 canonical lifetime usage, using the same P4 pricing as Prox analytics. The shim
 opens no usage database and loads no prices or client aliases. Credential, quota,
-plan and dashboard probes keep their existing sources and labels.
+and plan sources and labels are unchanged. The CPAMP dashboard probe is gone:
+`cliproxy_up{service="dashboard"}` is no longer emitted (the exporter no longer calls
+`:18317`; the service unit no longer orders after `cpa-manager-plus.service`).
+`cliproxy_up{service="proxy"}` and `{service="usage"}` remain. Delete
+`CliProxyDashboardDown` and its panel in the same rollout (swervebox).
 
 All 40 existing metric names and types remain. Every usage counter/gauge gains
 `source="prox-usage"`, including newest-request time and priced-model count. The

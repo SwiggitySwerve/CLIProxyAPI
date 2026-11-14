@@ -149,9 +149,9 @@ CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-fo
 
 独立的 CLIProxyAPI 使用量持久化与可视化服务，定期同步 CLIProxyAPI 数据，存储到 SQLite，提供聚合 API，并内置使用量分析与统计仪表盘。
 
-### [CPA-Manager-Plus](https://github.com/seakee/CPA-Manager-Plus)
+### prox-usage
 
-面向 CLIProxyAPI 的自托管管理面板与可观测性平台，既可作为无需额外服务的轻量管理界面运行，也可通过完整 Manager Server 获得持久化分析和运维能力。统一管理 OAuth 凭证、AI 提供商、客户端 API 密钥、模型别名、插件和 CPA 配置。基于 SQLite 的请求历史支持实时监控、失败诊断，以及按模型、提供商、账号、密钥和渠道统计 Token、延迟与预估成本。支持自定义模型价格与一键同步，并提供 Codex 与 xAI 配额检查、重置信息、账号健康巡检及受控恢复操作。支持 Docker 和跨平台原生部署，数据保存在本地。
+本部署的用量数据源：Prox usage 服务存储请求事件，并通过 `GET /v1/exporter`（需 Bearer 认证，仅限本机回环）提供规范的累计用量，`deploy/local/sidecars/exporter/` 中的本地 Prometheus exporter 读取该接口。详见该目录的 README。
 
 ### [Oh-My-CPA](https://github.com/WizisCool/oh-my-cpa)
 
