@@ -84,7 +84,6 @@ class ExporterProxyTruth(unittest.TestCase):
                 "id": "stub", "provider": "claude", "base_url": f"http://127.0.0.1:{srv.server_port}",
                 "management_path": "/m"}]}))
             mod = load_exporter(tmp)
-            mod.DASHBOARD = f"http://127.0.0.1:{srv.server_port}"
             mod.PROXIES = {"claude": (f"http://127.0.0.1:{srv.server_port}",
                                        f"http://127.0.0.1:{srv.server_port}/m", "stub")}
             with patch.object(mod, 'fetch_usage', return_value=(True, json.dumps(health_payload()).encode())), \
@@ -170,6 +169,21 @@ class ExporterUsageCounters(unittest.TestCase):
         fetch.assert_called_once_with("http://127.0.0.1:18320/v1/exporter",
                                       {"Authorization": "Bearer test-key"}, timeout=4)
         return m, {s: v for s, v in (l for l in m.lines if not isinstance(l, str))}
+
+    def test_unknown_endpoint_keys_are_ignored(self):
+        # Prox adds keys over time (event_loop, jobs, new per-group fields); none may change the output.
+        _, plain = self.scrape()
+        data = usage_payload()
+        data["event_loop"] = dict(max_lag_seconds=0.3, stalls_total=2, last_stall_time_seconds=None)
+        data["future_top_level"] = {"anything": [1, 2]}
+        data["groups"][0].update(future_group_field=7, tokens=dict(data["groups"][0]["tokens"], future_kind=1))
+        data["sources"][0]["future_source_field"] = "x"
+        _, extended = self.scrape(data)
+        self.assertEqual(extended, plain)
+        m = self.mod.Metrics()
+        with patch.object(self.mod, "http_ok", return_value=(True, json.dumps(data).encode())):
+            self.mod.collect_usage_health(m)
+        self.assertIn('cliproxy_usage_source_subscribed{instance="claude-primary"}', "\n".join(l[0] for l in m.lines if not isinstance(l, str)))
 
     def test_every_legacy_usage_series_keeps_its_name_labels_units_and_value(self):
         m, out = self.scrape()
@@ -391,13 +405,7 @@ class ExporterUsageHealth(unittest.TestCase):
                  patch.object(self.mod, 'collect_quota', side_effect=lambda m: calls.append('quota')), \
                  patch.object(self.mod, 'collect_credentials', side_effect=lambda m: calls.append('credentials')), \
                  patch.object(self.mod, 'collect_plans', side_effect=lambda m: calls.append('plans')):
-                # Dashboard stays on its original probe; intercept only that request.
-                original = self.mod.http_ok
-                def get(url, *args, **kwargs):
-                    if url.startswith(self.mod.DASHBOARD):
-                        return False, b''
-                    return original(url, *args, **kwargs)
-                with patch.object(self.mod, 'http_ok', side_effect=get), patch('sys.stderr'):
+                with patch('sys.stderr'):
                     start = time.monotonic(); text = self.mod.render(); elapsed = time.monotonic()-start
             self.assertLess(elapsed, 4.8)
             self.assertIn('cliproxy_up{service="usage"} 0', text)
@@ -444,6 +452,22 @@ class ExporterCutoverReadiness(unittest.TestCase):
             self.assertIn('cliproxy_up{service="usage"} 1',text)
             self.assertNotIn('cliproxy_requests_total',text)
             self.assertNotIn('cliproxy_api_equivalent_cost_usd_total',text)
+
+    def test_render_probes_no_dashboard_and_emits_no_dashboard_series(self):
+        self.mod.PROXIES={'claude':('http://127.0.0.1:1','http://127.0.0.1:1/m','stub')}
+        urls=[]
+        def fake(url,*args,**kwargs):
+            urls.append(url)
+            return (True,json.dumps(usage_payload()).encode()) if url.endswith('/v1/exporter') else (True,b'ok')
+        with patch.object(self.mod,'http_ok',side_effect=fake), \
+             patch.object(self.mod,'collect_quota'),patch.object(self.mod,'collect_credentials'), \
+             patch.object(self.mod,'collect_plans'):
+            text=self.mod.render()
+        self.assertFalse(hasattr(self.mod,'DASHBOARD'))
+        self.assertFalse([u for u in urls if '18317' in u or 'management.html' in u],urls)
+        self.assertNotIn('service="dashboard"',text)
+        self.assertIn('cliproxy_up{service="proxy",proxy="claude"} 1',text)
+        self.assertIn('cliproxy_up{service="usage"} 1',text)
 
     def test_health_and_usage_share_one_request_and_only_counters_gain_source(self):
         with patch.object(self.mod,'http_ok',return_value=(True,json.dumps(usage_payload()).encode())) as get:

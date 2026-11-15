@@ -11,7 +11,7 @@ Everything is computed at scrape time from local sources, read-only:
     This is the source of truth for availability.
   - cli-proxy-rerank state (~/.local/share/cli-proxy-rerank/state.json): ADVISORY weekly
     quota used %, reset time, limited flag and soonest-reset rank per account, with its age.
-  - Liveness of the proxy (:8317/healthz) and the dashboard (:18317).
+  - Liveness of the proxy instances (/healthz); the usage service's liveness is its own health series.
 
 Serves /metrics on 127.0.0.1 and the cluster bridge address so the in-cluster
 Prometheus can scrape it. Labels hold account emails; this endpoint is only
@@ -44,7 +44,6 @@ BUILTIN_INSTANCES = [
 # {"listen": [["127.0.0.1", 9787], ["<bridge-address>", 9787]]}. CLI_PROXY_EXPORTER_LISTEN
 # ("host:port,host:port") overrides the file; loopback only when neither is set.
 EXPORTER_FILE = Path(os.environ.get("CLI_PROXY_EXPORTER_CONFIG") or HOME / ".config/cli-proxy/exporter.json")
-DASHBOARD = "http://127.0.0.1:18317"
 USAGE = "http://127.0.0.1:18320"
 USAGE_SOURCE = "prox-usage"  # Bump on any later counter-decreasing price change.
 USAGE_DEADLINE_SECONDS = 4
@@ -442,11 +441,9 @@ def collect_credentials(m: Metrics):
 
 def render() -> str:
     m = Metrics()
-    up_dash, _ = http_ok(f"{DASHBOARD}/management.html")
     for name, (base, _, _) in PROXIES.items():
         up_proxy, _ = http_ok(f"{base}/healthz")
         m.add("cliproxy_up", "gauge", "Service reachable.", 1 if up_proxy else 0, service="proxy", proxy=name)
-    m.add("cliproxy_up", "gauge", "Service reachable.", 1 if up_dash else 0, service="dashboard")
     try:
         collect_usage_health(m)
     except Exception:
