@@ -243,6 +243,23 @@ class ExporterUsageCounters(unittest.TestCase):
         self.assertIn('# TYPE cliproxy_usage_unpriced_models gauge', m.text())
         self.assertIn('# TYPE cliproxy_usage_unpriced_model_info gauge', m.text())
 
+    def test_failed_requests_without_tokens_do_not_make_a_model_unpriced(self):
+        # prox-usage reports no cost for a group with nothing to price (e.g. failed calls that used
+        # no tokens). Only traffic with token usage and no price means the rate book lacks the model.
+        data = usage_payload()
+        zero = dict(input=0, output=0, cached=0, reasoning=0)
+        for changes in (
+            dict(model="m4", cost_usd=None, status="failed", tokens=dict(zero), cache=dict(read=0, write=0)),
+            dict(model="m5", cost_usd=None, status="failed", tokens=dict(zero, output=3), cache=dict(read=0, write=0)),
+            dict(model="m6", cost_usd=None, status="failed", tokens=dict(zero), cache=dict(read=0, write=2)),
+        ):
+            row = usage_group(); row.update(changes); data["groups"].append(row)
+        _, out = self.scrape(data)
+        self.assertEqual(out['cliproxy_usage_unpriced_models{source="prox-usage"}'], 2)
+        info = {k for k in out if k.startswith("cliproxy_usage_unpriced_model_info")}
+        self.assertEqual(info, {'cliproxy_usage_unpriced_model_info{provider="claude",model="m5",source="prox-usage"}',
+                                'cliproxy_usage_unpriced_model_info{provider="claude",model="m6",source="prox-usage"}'})
+
     def test_counters_are_transported_without_local_repricing_or_a_private_cache(self):
         first = usage_payload(); self.scrape(first)
         changed = usage_payload(); changed["groups"][0]["cost_usd"] = 3.75

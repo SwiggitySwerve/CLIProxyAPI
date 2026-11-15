@@ -230,7 +230,10 @@ def collect_usage(m: Metrics):
         if row["status"] not in ("success", "failed"):
             raise ValueError("invalid prox-usage request status")
         add("cliproxy_requests_total", "counter", "Requests through the proxy.", row["requests"], status=row["status"], **base)
-        if row["cost_usd"] is None and row["requests"] > 0:
+        # No cost with no token usage (e.g. failed calls) is nothing to price, not a missing rate.
+        if row["cost_usd"] is None and row["requests"] > 0 and (
+                any(row["tokens"][kind] for kind in ("input", "output", "cached", "reasoning"))
+                or any(row["cache"][kind] for kind in ("read", "write"))):
             unpriced.add((row["provider"], row["model"]))
         for kind in ("input", "output", "cached", "reasoning"):
             add("cliproxy_tokens_total", "counter", "Tokens by type (cached and reasoning are subsets).",
