@@ -155,9 +155,9 @@ Since v6.10.0, CLIProxyAPI and [CPAMC](https://github.com/router-for-me/Cli-Prox
 
 Standalone persistence and visualization service for CLIProxyAPI, with periodic data sync, SQLite storage, aggregate APIs, and a built-in dashboard for usage and statistics.
 
-### [CPA-Manager-Plus](https://github.com/seakee/CPA-Manager-Plus)
+### prox-usage
 
-A self-hosted CLIProxyAPI management console and observability dashboard, available as a lightweight drop-in panel or a full Manager Server with persistent analytics. Manage OAuth credentials, AI providers, client API keys, model aliases, plugins, and CPA settings in one interface. SQLite-backed request history enables live monitoring, failure diagnosis, and token, latency, and estimated-cost breakdowns by model, provider, account, key, and channel. Supports editable model prices and one-click price sync, alongside Codex and xAI quota checks, reset information, account-health inspection, and controlled recovery actions. Deploy via Docker or cross-platform native packages, with data stored locally.
+This deployment's usage source: the Prox usage service stores request events and serves canonical lifetime usage totals at `GET /v1/exporter` (bearer-protected, loopback), which the local Prometheus exporter in `deploy/local/sidecars/exporter/` reads. See that directory's README.
 
 ### [Oh-My-CPA](https://github.com/WizisCool/oh-my-cpa)
 

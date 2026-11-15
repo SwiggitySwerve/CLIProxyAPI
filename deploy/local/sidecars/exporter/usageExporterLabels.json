@@ -1,0 +1,63 @@
+{
+  "client_alias": [
+    {
+      "api_key_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "alias": "Windows · SwerveStation"
+    }
+  ],
+  "events": [
+    {
+      "provider": "claude",
+      "requested_model": "claude-sonnet-5-5(high)",
+      "model": "claude-sonnet-5-5(high)",
+      "resolved_model": "claude-sonnet-5-5",
+      "account_snapshot": "one@example.test",
+      "auth_label_snapshot": "Ops",
+      "auth_index": "a",
+      "api_key_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "failed": 0
+    },
+    {
+      "provider": "codex",
+      "requested_model": "",
+      "model": "gpt-6.1-terra",
+      "resolved_model": "gpt-6.1-terra",
+      "account_snapshot": "",
+      "auth_label_snapshot": "Bench rig",
+      "auth_index": "b",
+      "api_key_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "failed": 1
+    },
+    {
+      "provider": "codex",
+      "requested_model": "client-fast",
+      "model": "client-fast",
+      "resolved_model": "gpt-6.1-terra",
+      "account_snapshot": null,
+      "auth_label_snapshot": null,
+      "auth_index": "3",
+      "api_key_hash": null,
+      "failed": 0
+    }
+  ],
+  "labels": [
+    {
+      "provider": "claude",
+      "model": "claude-sonnet-5-5(high)",
+      "account": "one@example.test",
+      "client": "Windows · SwerveStation"
+    },
+    {
+      "provider": "codex",
+      "model": "gpt-6.1-terra",
+      "account": "Bench rig",
+      "client": "key bbbbbbbb"
+    },
+    {
+      "provider": "codex",
+      "model": "client-fast",
+      "account": "3",
+      "client": "unknown"
+    }
+  ]
+}

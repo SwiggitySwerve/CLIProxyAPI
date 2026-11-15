@@ -148,9 +148,9 @@ v6.10.0以降、CLIProxyAPIおよび [CPAMC](https://github.com/router-for-me/Cl
 
 CLIProxyAPI向けの独立した使用量永続化・可視化サービス。CLIProxyAPIデータを定期同期してSQLiteに保存し、集計APIと、使用量や各種統計を確認できる組み込みダッシュボードを提供します。
 
-### [CPA-Manager-Plus](https://github.com/seakee/CPA-Manager-Plus)
+### prox-usage
 
-CLIProxyAPI 向けのセルフホスト型管理コンソールと可観測性ダッシュボードです。追加サービス不要の軽量パネルとしても、リクエスト履歴の永続化と分析機能を備えた Manager Server としても利用できます。OAuth 認証情報、AI プロバイダー、クライアント API キー、モデルエイリアス、プラグイン、CPA 設定を一元管理します。SQLite に保存したリクエスト履歴から、リアルタイム監視、エラー原因の調査、モデル・プロバイダー・アカウント・キー・チャネル別の Token 使用量、レイテンシ、推定コストを分析できます。モデル料金の編集とワンクリック同期に対応し、Codex と xAI のクォータ確認、リセット情報、アカウントの健全性チェック、制御された復旧操作を提供します。Docker またはクロスプラットフォームのネイティブパッケージで導入でき、データはローカルに保存されます。
+このデプロイの使用量ソース：Prox usage サービスがリクエストイベントを保存し、`GET /v1/exporter`（Bearer 認証、ループバックのみ）で正規の累積使用量を提供します。`deploy/local/sidecars/exporter/` のローカル Prometheus exporter がこれを読み取ります。詳細は同ディレクトリの README を参照してください。
 
 ### [Oh-My-CPA](https://github.com/WizisCool/oh-my-cpa)
 
