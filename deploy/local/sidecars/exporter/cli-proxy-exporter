@@ -3,7 +3,7 @@
 
 Everything is computed at scrape time from local sources, read-only:
   - prox-usage GET /v1/exporter: canonical lifetime usage at the same current rates
-    as Prox analytics, with source="prox-usage" and the existing label values.
+    as Prox analytics, with source="prox-usage-2" (bumped from "prox-usage" for a price decrease) and the existing label values.
   - prox-usage source subscription and event age: additive health without a source label.
   - CLIProxyAPI management API (GET /credentials on each instance): the proxy's own
     state per credential (available / cooling / unavailable / disabled, next_retry_after,
@@ -45,7 +45,7 @@ BUILTIN_INSTANCES = [
 # ("host:port,host:port") overrides the file; loopback only when neither is set.
 EXPORTER_FILE = Path(os.environ.get("CLI_PROXY_EXPORTER_CONFIG") or HOME / ".config/cli-proxy/exporter.json")
 USAGE = "http://127.0.0.1:18320"
-USAGE_SOURCE = "prox-usage"  # Bump on any later counter-decreasing price change.
+USAGE_SOURCE = "prox-usage-2"  # Bumped 2026-11-16 for the Sonnet 5.5 cache-read decrease; bump again on any later counter-decreasing price change.
 USAGE_DEADLINE_SECONDS = 4
 _usage_http_gate = threading.Semaphore(1)
 # Anthropic reports some limits under internal codenames; same labels as the dashboard.

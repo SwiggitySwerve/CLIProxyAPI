@@ -187,7 +187,7 @@ class ExporterUsageCounters(unittest.TestCase):
 
     def test_every_legacy_usage_series_keeps_its_name_labels_units_and_value(self):
         m, out = self.scrape()
-        base = 'provider="claude",model="m1",account="acct",client="Work laptop",source="prox-usage"'
+        base = 'provider="claude",model="m1",account="acct",client="Work laptop",source="prox-usage-2"'
         expected = {
             f'cliproxy_requests_total{{status="success",{base}}}': 5,
             f'cliproxy_latency_seconds_sum{{{base}}}': 2.5,
@@ -196,9 +196,9 @@ class ExporterUsageCounters(unittest.TestCase):
             f'cliproxy_ttft_seconds_count{{{base}}}': 2,
             f'cliproxy_zero_token_success_total{{{base}}}': 1,
             f'cliproxy_api_equivalent_cost_usd_total{{{base}}}': 1.25,
-            'cliproxy_last_request_timestamp_seconds{source="prox-usage"}': 1700000000.123,
-            'cliproxy_models_priced{source="prox-usage"}': 34,
-            'cliproxy_usage_unpriced_models{source="prox-usage"}': 0,
+            'cliproxy_last_request_timestamp_seconds{source="prox-usage-2"}': 1700000000.123,
+            'cliproxy_models_priced{source="prox-usage-2"}': 34,
+            'cliproxy_usage_unpriced_models{source="prox-usage-2"}': 0,
         }
         for kind, value in (("input", 123), ("output", 45), ("cached", 6), ("reasoning", 7)):
             expected[f'cliproxy_tokens_total{{type="{kind}",{base}}}'] = value
@@ -237,9 +237,9 @@ class ExporterUsageCounters(unittest.TestCase):
         ):
             row = usage_group(); row.update(changes); data["groups"].append(row)
         m, out = self.scrape(data)
-        self.assertEqual(out['cliproxy_usage_unpriced_models{source="prox-usage"}'], 1)
+        self.assertEqual(out['cliproxy_usage_unpriced_models{source="prox-usage-2"}'], 1)
         info = {k: v for k, v in out.items() if k.startswith("cliproxy_usage_unpriced_model_info")}
-        self.assertEqual(info, {'cliproxy_usage_unpriced_model_info{provider="claude",model="m2",source="prox-usage"}': 1})
+        self.assertEqual(info, {'cliproxy_usage_unpriced_model_info{provider="claude",model="m2",source="prox-usage-2"}': 1})
         self.assertIn('# TYPE cliproxy_usage_unpriced_models gauge', m.text())
         self.assertIn('# TYPE cliproxy_usage_unpriced_model_info gauge', m.text())
 
@@ -255,10 +255,10 @@ class ExporterUsageCounters(unittest.TestCase):
         ):
             row = usage_group(); row.update(changes); data["groups"].append(row)
         _, out = self.scrape(data)
-        self.assertEqual(out['cliproxy_usage_unpriced_models{source="prox-usage"}'], 2)
+        self.assertEqual(out['cliproxy_usage_unpriced_models{source="prox-usage-2"}'], 2)
         info = {k for k in out if k.startswith("cliproxy_usage_unpriced_model_info")}
-        self.assertEqual(info, {'cliproxy_usage_unpriced_model_info{provider="claude",model="m5",source="prox-usage"}',
-                                'cliproxy_usage_unpriced_model_info{provider="claude",model="m6",source="prox-usage"}'})
+        self.assertEqual(info, {'cliproxy_usage_unpriced_model_info{provider="claude",model="m5",source="prox-usage-2"}',
+                                'cliproxy_usage_unpriced_model_info{provider="claude",model="m6",source="prox-usage-2"}'})
 
     def test_counters_are_transported_without_local_repricing_or_a_private_cache(self):
         first = usage_payload(); self.scrape(first)
@@ -495,7 +495,7 @@ class ExporterCutoverReadiness(unittest.TestCase):
                 if line[0].startswith(('cliproxy_up{','cliproxy_usage_source_')):
                     self.assertNotIn('source=',line[0])
                 else:
-                    self.assertIn('source="prox-usage"',line[0])
+                    self.assertIn('source="prox-usage-2"',line[0])
 
     def test_shared_fixture_matches_old_sql_labels_and_endpoint_serialization(self):
         import sqlite3
