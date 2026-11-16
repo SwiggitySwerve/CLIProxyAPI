@@ -24,6 +24,7 @@ type claudeProbeExecutor struct {
 	headers     http.Header
 	err         error
 	during      func() // runs inside the inference request, before it returns
+	cutOff      bool   // the 200 reply stops at the token budget instead of completing
 	inferModels []string
 
 	usageStatus int
@@ -41,7 +42,7 @@ func (e *claudeProbeExecutor) Execute(context.Context, *Auth, cliproxyexecutor.R
 func (e *claudeProbeExecutor) ExecuteStream(ctx context.Context, _ *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	e.mu.Lock()
 	e.inferModels = append(e.inferModels, req.Model)
-	headers, err, during := e.headers, e.err, e.during
+	headers, err, during, cutOff := e.headers, e.err, e.during, e.cutOff
 	e.mu.Unlock()
 	if during != nil {
 		during()
@@ -51,7 +52,11 @@ func (e *claudeProbeExecutor) ExecuteStream(ctx context.Context, _ *Auth, req cl
 		return nil, err
 	}
 	ch := make(chan cliproxyexecutor.StreamChunk, 1)
-	ch <- cliproxyexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.completed","response":{"status":"completed"}}`)}
+	if cutOff {
+		ch <- cliproxyexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}`)}
+	} else {
+		ch <- cliproxyexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.completed","response":{"status":"completed"}}`)}
+	}
 	close(ch)
 	return &cliproxyexecutor.StreamResult{Chunks: ch}, nil
 }
@@ -194,6 +199,38 @@ func TestClaudeRecheckClearModeClearsOnAllowedHeaders(t *testing.T) {
 	}
 	if exec.usageCount() != 0 {
 		t.Fatalf("usage snapshot calls = %d, want 0 (the verdict was due anyway)", exec.usageCount())
+	}
+}
+
+// The probe asks for a few tokens, so a model that thinks first is cut off at
+// the budget. That reply is still a 200 whose rate-limit headers answer the
+// question the probe asks.
+func TestClaudeRecheckClearsWhenProbeReplyIsCutOff(t *testing.T) {
+	manager, exec, _ := newClaudeRecheckManager(t, internalconfig.QuotaReconcileClear)
+	exec.headers = claudeAllowedWarning
+	exec.cutOff = true
+
+	manager.reconcileQuotaCooldowns(context.Background())
+
+	if exec.inferCount() != 1 {
+		t.Fatalf("inference probes = %d, want 1", exec.inferCount())
+	}
+	if claudeCooled(t, manager) {
+		t.Fatalf("cooldown kept although the cut-off probe's headers say allowed")
+	}
+}
+
+func TestClaudeRecheckKeepsCooldownWhenCutOffProbeHasNoHeaders(t *testing.T) {
+	manager, exec, _ := newClaudeRecheckManager(t, internalconfig.QuotaReconcileClear)
+	exec.cutOff = true
+
+	manager.reconcileQuotaCooldowns(context.Background())
+
+	if exec.inferCount() != 1 {
+		t.Fatalf("inference probes = %d, want 1", exec.inferCount())
+	}
+	if !claudeCooled(t, manager) {
+		t.Fatalf("cooldown cleared by a cut-off probe that carried no rate-limit headers")
 	}
 }
 
