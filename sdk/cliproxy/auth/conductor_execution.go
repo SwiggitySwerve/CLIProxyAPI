@@ -2445,6 +2445,7 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 			}
 			if resp.Incomplete || !isCompletedExecutionPayload(resp.Payload) {
 				incompleteErr := &Error{Code: "incomplete_response", Message: "verification response did not complete", HTTPStatus: http.StatusBadGateway}
+				m.observeIncompleteResponseQuota(execCtx, auth.ID, provider, credVersion, regEpoch)
 				updated, _ := m.GetByID(auth.ID)
 				return updated, incompleteErr
 			}
@@ -2539,6 +2540,7 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 	}
 	if !sawCompleted || sawIncomplete {
 		incompleteErr := &Error{Code: "incomplete_response", Message: "verification stream ended without a completed response", HTTPStatus: http.StatusBadGateway}
+		m.observeIncompleteResponseQuota(execCtx, auth.ID, provider, credVersion, regEpoch)
 		updated, _ := m.GetByID(auth.ID)
 		return updated, incompleteErr
 	}

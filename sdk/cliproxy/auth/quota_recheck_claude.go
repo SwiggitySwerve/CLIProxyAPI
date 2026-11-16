@@ -152,16 +152,28 @@ func claudeSignalsVerdict(signals map[string]string, windows []string) (QuotaVer
 }
 
 // claudeProbeCompleted reports whether VerifyInference's error still means the
-// request completed with a 200. VerifyInference returns credential_superseded
-// after a completed response whenever the credential is not inference-verified,
-// and a live credential-scoped cooldown keeps that flag false. With the same
-// credential version and epoch the credential was not actually replaced.
+// request was answered with a 200, so its rate-limit headers can be judged.
+//
+// incomplete_response: the 200 reply did not finish. The probe asks for very
+// few output tokens and a model that thinks first is cut off at that budget,
+// which is the normal case, not a failure of the probe.
+//
+// credential_superseded: returned after a completed response whenever the
+// credential is not inference-verified, and a live credential-scoped cooldown
+// keeps that flag false. With the same credential version and epoch the
+// credential was not actually replaced.
 func claudeProbeCompleted(auth, updated *Auth, errProbe error) bool {
 	var authErr *Error
-	if !errors.As(errProbe, &authErr) || authErr == nil || authErr.Code != "credential_superseded" || updated == nil {
+	if !errors.As(errProbe, &authErr) || authErr == nil || updated == nil {
 		return false
 	}
-	return updated.CredentialVersion == auth.CredentialVersion && updated.RegistrationEpoch == auth.RegistrationEpoch
+	switch authErr.Code {
+	case "incomplete_response":
+		return true
+	case "credential_superseded":
+		return updated.CredentialVersion == auth.CredentialVersion && updated.RegistrationEpoch == auth.RegistrationEpoch
+	}
+	return false
 }
 
 func claudeUnifiedStatusAllows(status string) bool {

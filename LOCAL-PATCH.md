@@ -128,9 +128,14 @@ short backoff.
 - Verdict: one minimal real inference through `Manager.VerifyInference` (16 output
   tokens) on the cheapest registered model (haiku, then sonnet, then the rest). Under
   model-level cooling it skips models that have their own cooldown, because a success
-  clears that model through `MarkResult`. Allowed needs a completed 200 whose
+  clears that model through `MarkResult`. Allowed needs a 200 whose
   `Anthropic-Ratelimit-Unified-Status` is `allowed` or `allowed_warning`, no window
-  `rejected`, and every window that set the cooldown reported as allowed. A 429 or a
+  `rejected`, and every window that set the cooldown reported as allowed. The 200 does
+  not have to finish: Haiku thinks first, so its reply is always cut off at the 16
+  tokens and `VerifyInference` reports `incomplete_response`. For those replies
+  `VerifyInference` stores the rate-limit headers itself
+  (`observeIncompleteResponseQuota`, since `MarkResult` is not called) and the verdict
+  judges them. Before this, no Claude probe could answer allowed. A 429 or a
   rejected status is limited; `MarkResult` inside `VerifyInference` re-derives the
   deadline once and the loop adds nothing. Everything else is unknown and keeps the
   cooldown. A clear goes through the same guarded `resetQuota` as Codex.

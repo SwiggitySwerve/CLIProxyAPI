@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 )
 
 // QuotaObservationSourceResponseHeaders marks an observation captured from
@@ -68,6 +70,29 @@ func (m *Manager) noteQuotaObservationsSaved() {
 func (m *Manager) observeQuotaChange() {
 	if m.markQuotaObservationDirty() {
 		m.persistCooldownStates(context.Background())
+	}
+}
+
+// observeIncompleteResponseQuota records the passive quota snapshot of a 2xx
+// response that did not complete, such as a reply cut off at its token
+// budget. MarkResult is not called for those, so their rate-limit headers
+// would otherwise be lost. Like every observation it touches only the
+// snapshot, never cooldown or scheduling state. Callers must not hold m.mu.
+func (m *Manager) observeIncompleteResponseQuota(ctx context.Context, authID, provider string, credVersion, regEpoch uint64) {
+	headers := internallogging.GetResponseHeaders(ctx)
+	if len(headers) == 0 {
+		return
+	}
+	releaseMutation := m.lockAuthMutation(authID)
+	m.mu.Lock()
+	changed := false
+	if auth := m.auths[authID]; auth != nil && auth.CredentialVersion == credVersion && auth.RegistrationEpoch == regEpoch {
+		changed = auth.Quota.ObserveResponseHeadersForProvider(provider, headers, time.Now()) && m.cooldownStore != nil
+	}
+	m.mu.Unlock()
+	releaseMutation()
+	if changed {
+		m.observeQuotaChange()
 	}
 }
 
