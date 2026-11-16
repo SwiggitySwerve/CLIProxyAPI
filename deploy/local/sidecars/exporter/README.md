@@ -11,7 +11,7 @@ and plan sources and labels are unchanged. The CPAMP dashboard probe is gone:
 `CliProxyDashboardDown` and its panel in the same rollout (swervebox).
 
 All 40 existing metric names and types remain. Every usage counter/gauge gains
-`source="prox-usage"`, including newest-request time and priced-model count. The
+`source="prox-usage-2"` (was `prox-usage` until the 2026-11-16 Sonnet 5.5 price decrease), including newest-request time and priced-model count. The
 other label keys and visible requested-model/account/provider/client values stay
 as before. Health series retain their additive identities, including
 `cliproxy_up{service="usage"}` and the two `cliproxy_usage_source_*{instance}`
@@ -97,7 +97,7 @@ a different model candidate. Cost HELP changes from "synced in the dashboard" to
 
 Nothing syncs prices any more, so a model missing from the rate book has no cost
 series and would go unnoticed. Two gauges make it visible:
-`cliproxy_usage_unpriced_models{source="prox-usage"}` is the number of distinct
+`cliproxy_usage_unpriced_models{source="prox-usage-2"}` is the number of distinct
 (provider, model) pairs that have requests and no price in the snapshot (0 when
 all are priced), and `cliproxy_usage_unpriced_model_info{provider,model,source}`
 is 1 for each such pair, for an alert's labels.
