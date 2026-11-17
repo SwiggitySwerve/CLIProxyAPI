@@ -5,8 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
-	"github.com/MoeForge/moego/base64"
 	"io"
 	"net/http"
 	"net/url"
@@ -16,6 +14,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
 
 	"github.com/gin-gonic/gin"
 	baseauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth"
@@ -156,7 +157,13 @@ type Auth struct {
 	// stamped at or below it were dispatched before the cooldown existed and
 	// must not clear it. Runtime only: zero after restart so restored
 	// cooldowns can still be cleared by any success.
-	cooldownRecordedSeq uint64 `json:"-"`
+	cooldownRecordedSeq     uint64    `json:"-"`
+	forceCooldownUntil      time.Time `json:"-"`
+	quotaForceCooldownUntil time.Time `json:"-"`
+	credQuotaForceUntil     time.Time `json:"-"`
+	credentialRetryAfter    time.Time `json:"-"`
+	nonQuotaCooldownUntil   time.Time `json:"-"`
+	forceCooldownSeeded     bool      `json:"-"`
 
 	recentRequests recentRequestRing `json:"-"`
 	indexAssigned  bool              `json:"-"`
@@ -405,7 +412,11 @@ type ModelState struct {
 	// stamped at or below it were dispatched before the cooldown existed and
 	// must not clear it. Runtime only: zero after restart so restored
 	// cooldowns can still be cleared by any success.
-	cooldownRecordedSeq uint64 `json:"-"`
+	cooldownRecordedSeq     uint64    `json:"-"`
+	forceCooldownUntil      time.Time `json:"-"`
+	quotaForceCooldownUntil time.Time `json:"-"`
+	nonQuotaCooldownUntil   time.Time `json:"-"`
+	forceCooldownSeeded     bool      `json:"-"`
 }
 
 func recentRequestBucketID(now time.Time) int64 {
@@ -480,12 +491,10 @@ func (a *Auth) Clone() *Auth {
 	copyAuth := *a
 	copyAuth.Quota = a.Quota.Clone()
 	if a.LastError != nil {
-		copyErr := *a.LastError
-		copyAuth.LastError = &copyErr
+		copyAuth.LastError = a.LastError.Clone()
 	}
 	if a.RefreshError != nil {
-		copyErr := *a.RefreshError
-		copyAuth.RefreshError = &copyErr
+		copyAuth.RefreshError = a.RefreshError.Clone()
 	}
 	if a.Attributes != nil {
 		copyAuth.Attributes = make(map[string]string, len(a.Attributes))
@@ -750,12 +759,7 @@ func (m *ModelState) Clone() *ModelState {
 	copyState := *m
 	copyState.Quota = m.Quota.Clone()
 	if m.LastError != nil {
-		copyState.LastError = &Error{
-			Code:       m.LastError.Code,
-			Message:    m.LastError.Message,
-			Retryable:  m.LastError.Retryable,
-			HTTPStatus: m.LastError.HTTPStatus,
-		}
+		copyState.LastError = m.LastError.Clone()
 	}
 	return &copyState
 }

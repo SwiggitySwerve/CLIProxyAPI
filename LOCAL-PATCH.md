@@ -1,6 +1,10 @@
 # Local patch: ultrafast account gate
 
-Base: upstream `v8.0.65` (`65de937c`). Branch: `local/ultrafast-v8.0.65`.
+Base: upstream `v8.0.76` (`7df56074`). Branch: `local/ultrafast-v8.0.65` (ProxD's deploy
+branch; the name keeps the release it started from).
+
+Upstream `v8.0.76` was merged in on 2026-11-17 with a merge commit, so the fork's
+commits keep their SHAs. See "Upstream v8.0.76 merge" below for what was adapted.
 
 Rebased from `v8.0.44` on 2026-11-11. Upstream replaced `tidwall/gjson`/`sjson`
 with `MoeForge/moego/ojson` and rewrote the Codex executors and usage parsers on
@@ -454,3 +458,34 @@ Tests: `TestAuthenticateManagementKey_RepeatedSameWrongKeyDoesNotBan`,
 `TestAuthenticateManagementKey_RepeatedKeysShareTheFiveSlots`,
 `TestAuthenticateManagementKey_LocalhostIPBan_BlocksCorrectKeyDuringBan` (now five
 distinct keys).
+
+## Upstream v8.0.76 merge
+
+Upstream added force-cooldown provenance (`forceCooldownUntil`, `quotaForceCooldownUntil`,
+`nonQuotaCooldownUntil`, `credQuotaForceUntil`, `credentialRetryAfter` and the matching
+`CooldownStateRecord` fields). It is ported onto this fork's design, where a credential
+quota stays on the credential and a model state holds only that model's own cooldown:
+
+- `recordCredentialQuotaLocked` records a forced credential-scoped 429 in
+  `credQuotaForceUntil`; the per-model branch of `MarkResult` records a model's own force
+  and non-quota deadlines.
+- `credentialAvailabilityBlock` carries the two new credential-wide gates (an auth-level
+  force cooldown and `credentialRetryAfter`), so selection, the scheduler shards and
+  `isCredentialBlocked` still read one predicate.
+- `clearDisabledCooldownStateForAuth` keeps each model state's own force deadline under
+  `disable-cooling`; there is no wrapped layer to unwind.
+- A model record written by a build that copied the credential quota into model states
+  still restores only the model's own cooldown, now with its own force deadlines
+  (`independent_*_cooldown_until`). Those fields are read, never written.
+
+Left out, because they only act on the copied (`credentialQuotaShadow` /
+`credentialQuotaPropagated`) layer this fork removed:
+`propagateCredentialQuotaToModelStatesLocked`, the shadow merge in `mergeModelState`, the
+unwrap loop in `clearAuthStateOnSuccess`, the saved-outer-state restore for a
+credential-scoped non-quota failure under a forced credential quota, and raising
+`credQuotaForceUntil` from a wrapped model record (the auth-level record carries it).
+
+Upstream's one-line `AGENTS.md` change (it now also forbids `encoding/json` and `regexp`
+in favour of `moego/json` and `moego/regexp`) is held back, because a workflow closes any
+PR that touches `AGENTS.md`. The rule is followed anyway: fork-added code uses the moego
+packages.
