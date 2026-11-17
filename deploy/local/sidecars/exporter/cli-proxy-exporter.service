@@ -1,6 +1,6 @@
 [Unit]
 Description=Prometheus exporter for CLIProxyAPI usage, quota and health
-After=proxd.service
+After=proxd-codex.service
 
 [Service]
 ExecStart=%h/bin/cli-proxy-exporter
