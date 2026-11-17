@@ -1,6 +1,9 @@
 # Local deployment tooling
 
-Tools for building, testing and rolling the proxy on a single host with podman.
+Tools for building, testing and rolling the proxy (ProxD) on a single host with podman.
+The live services are `proxd` (Codex, port 8317) and `proxd-claude` (Claude, port 8319).
+Their data directories, `~/.local/share/cli-proxy-api` and `~/.local/share/cli-proxy-claude`,
+and the image repository `localhost/cli-proxy-api` keep the upstream names.
 
 ```
 deploy/local/
@@ -122,8 +125,8 @@ this script.
 ```bash
 deploy/local/bin/roll.sh staging <image-tag>
 deploy/local/bin/roll.sh --dry-run claude <image-tag>      # print only, touches nothing
-deploy/local/bin/roll.sh --approved claude <image-tag>     # live: cli-proxy-claude.container
-deploy/local/bin/roll.sh --approved codex  <image-tag>     # live: cli-proxy-api.container
+deploy/local/bin/roll.sh --approved claude <image-tag>     # live: proxd-claude.container
+deploy/local/bin/roll.sh --approved codex  <image-tag>     # live: proxd.container
 ```
 
 A live roll records the running image under `<data dir>/rollback/`, rewrites the unit's
