@@ -1,6 +1,6 @@
 [Unit]
 Description=Observe CLIProxyAPI account quotas (read-only)
-After=cli-proxy-api.service
+After=proxd.service
 
 [Service]
 Type=oneshot

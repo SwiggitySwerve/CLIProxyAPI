@@ -2,8 +2,8 @@
 # roll.sh [--approved] [--dry-run] <staging|claude|codex> <image-tag>
 #
 #   staging  recreate the staging proxy container from <image-tag>.
-#   claude   live unit cli-proxy-claude.container (container cli-proxy-claude, port 8319).
-#   codex    live unit cli-proxy-api.container    (container cli-proxy-api,    port 8317).
+#   claude   live unit proxd-claude.container (container proxd-claude, port 8319).
+#   codex    live unit proxd.container        (container proxd,        port 8317).
 #
 # Live targets need --approved. They record the running image to a rollback file,
 # rewrite the unit's Image= line, daemon-reload, restart that one unit, smoke-check
@@ -58,8 +58,8 @@ roll_staging() {
 roll_live() {
   local unit service container port
   case "$TARGET" in
-    claude) unit=cli-proxy-claude.container service=cli-proxy-claude.service container=cli-proxy-claude port=8319 ;;
-    codex) unit=cli-proxy-api.container service=cli-proxy-api.service container=cli-proxy-api port=8317 ;;
+    claude) unit=proxd-claude.container service=proxd-claude.service container=proxd-claude port=8319 ;;
+    codex) unit=proxd.container service=proxd.service container=proxd port=8317 ;;
   esac
   local unit_path="$UNIT_DIR/$unit"
   [ -f "$unit_path" ] || die "unit file $unit_path not found"
