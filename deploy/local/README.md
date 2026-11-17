@@ -1,6 +1,6 @@
 # Local deployment tooling
 
-Tools for building, testing and rolling the proxy (proxd) on a single host with podman.
+Tools for building, testing and rolling the proxy (ProxD) on a single host with podman.
 The live services are `proxd` (Codex, port 8317) and `proxd-claude` (Claude, port 8319).
 Their data directories, `~/.local/share/cli-proxy-api` and `~/.local/share/cli-proxy-claude`,
 and the image repository `localhost/cli-proxy-api` keep the upstream names.
