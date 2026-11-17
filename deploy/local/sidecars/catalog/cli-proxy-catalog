@@ -14,8 +14,9 @@ It also serves GET /registry/models.json, the proxy's model registry source
 (config `models.catalog`): the live router-for-me/models catalog, any entry
 from ~/.config/cli-proxy-catalog/extra-models.json whose id upstream doesn't list
 yet, and listed GPT models from the ultrafast account that upstream does not have
-yet. Account metadata refreshes context length and Codex speed tiers on models
-already listed. A failed account fetch keeps the upstream catalog. If the
+yet, added to each codex-<plan> section their available_in_plans maps to (codex-pro
+when the account lists no plans). Account metadata refreshes context length and
+Codex speed tiers on models already listed. A failed account fetch keeps the upstream catalog. If the
 upstream fetch fails it returns 502 and the proxy keeps its last valid catalog. Serves :8318 on all interfaces (LAN + tailnet subnet route);
 without a valid client key the proxy itself refuses the upstream call.
 
@@ -48,6 +49,13 @@ FORWARD_HEADERS = ("Authorization", "User-Agent", "originator", "Accept", "versi
 REGISTRY_UPSTREAM = "https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/models.json"
 EXTRA_MODELS = Path.home() / ".config/cli-proxy-catalog/extra-models.json"
 CODEX_REGISTRY_UPSTREAM = "https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/codex_client_models.json"
+# The account catalog hides models whose minimal_client_version is above this (gpt-6.2-* needs 0.166.0).
+CODEX_CLIENT_VERSION = "0.169.0"
+# Account plan -> proxy registry section, as sdk/cliproxy/service_models.go picks it for a Codex credential.
+PLAN_SECTIONS = {"pro": "codex-pro", "plus": "codex-plus", "team": "codex-team", "business": "codex-team",
+                 "go": "codex-team", "free": "codex-free"}
+# Thinking levels the proxy parses (internal/thinking); the account also lists "ultra", which it does not.
+PROXY_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 
 def load_config() -> dict:
@@ -98,11 +106,11 @@ def load_account_models() -> list:
         reply = management("POST", "/requests/api-call", {
             "auth_index": cred["auth_index"],
             "method": "GET",
-            "url": "https://chatgpt.com/backend-api/codex/models?client_version=0.162.1",
+            "url": "https://chatgpt.com/backend-api/codex/models?client_version=" + CODEX_CLIENT_VERSION,
             "header": {
                 "Authorization": "Bearer $TOKEN$",
                 "Chatgpt-Account-Id": account_id,
-                "User-Agent": "codex_cli_rs/0.162.1 (Linux; x86_64)",
+                "User-Agent": "codex_cli_rs/" + CODEX_CLIENT_VERSION + " (Linux; x86_64)",
                 "Originator": "codex_cli_rs",
             },
         })
@@ -131,7 +139,7 @@ def openai_registry_entry(account_model: dict) -> dict:
     levels = [
         level.get("effort")
         for level in account_model.get("supported_reasoning_levels") or []
-        if isinstance(level, dict) and level.get("effort")
+        if isinstance(level, dict) and level.get("effort") in PROXY_LEVELS
     ]
     context = account_model.get("context_window") or account_model.get("max_context_window") or 272000
     return {
@@ -151,28 +159,25 @@ def openai_registry_entry(account_model: dict) -> dict:
     }
 
 
-def openai_model_list(catalog: dict) -> list:
-    for models in catalog.values():
-        if isinstance(models, list) and any(
-            isinstance(model, dict) and str(model.get("id") or "").startswith("gpt-") for model in models
-        ):
-            return models
-    return catalog.setdefault("openai", [])
+def plan_sections(account_model: dict) -> list:
+    """Registry sections serving the plans this model is offered on; codex-pro if it names none."""
+    plans = account_model.get("available_in_plans")
+    if not isinstance(plans, list):
+        return ["codex-pro"]
+    return sorted({PLAN_SECTIONS[plan] for plan in plans if plan in PLAN_SECTIONS})
 
 
 def apply_current_gpt_models(catalog: dict, account_models: list) -> None:
-    listed = openai_model_list(catalog)
-    by_id = {model.get("id"): model for model in listed if isinstance(model, dict)}
     for account_model in current_gpt_models(account_models):
-        entry = by_id.get(account_model["slug"])
-        if entry is None:
-            entry = openai_registry_entry(account_model)
-            listed.append(entry)
-            by_id[account_model["slug"]] = entry
-            continue
-        context = account_model.get("context_window")
-        if isinstance(context, int) and context > int(entry.get("context_length") or 0):
-            entry["context_length"] = context
+        for section in plan_sections(account_model):
+            listed = catalog.setdefault(section, [])
+            entry = next((m for m in listed if isinstance(m, dict) and m.get("id") == account_model["slug"]), None)
+            if entry is None:
+                listed.append(openai_registry_entry(account_model))
+                continue
+            context = account_model.get("context_window")
+            if isinstance(context, int) and context > int(entry.get("context_length") or 0):
+                entry["context_length"] = context
 
 
 def merged_registry() -> bytes:

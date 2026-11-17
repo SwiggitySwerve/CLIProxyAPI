@@ -182,6 +182,74 @@ class CatalogTest(unittest.TestCase):
         proxy, catalog = self.start([credential()])
         self.assertEqual(catalog.proxy_base(), proxy.base_url)
 
+    def test_fetch_client_version_unlocks_gpt_6_2(self):
+        # gpt-6.2-sol and gpt-6.2-astra declare minimal_client_version 0.166.0; an older
+        # client_version gets a catalog without them.
+        proxy, catalog = self.start([credential()])
+        catalog.load_account_models()
+        (call,) = proxy.api_calls()
+        version = call["body"]["url"].split("client_version=", 1)[1].split("&", 1)[0]
+        self.assertGreaterEqual(tuple(int(part) for part in version.split(".")), (0, 166, 0))
+        self.assertIn(version, call["body"]["header"]["User-Agent"])
+
+
+def registry_with_codex_sections():
+    known = {"id": "gpt-6.1-sol", "context_length": 272000}
+    return {
+        "claude": [{"id": "claude-opus-5-5"}],
+        "codex-free": [{"id": "gpt-6-luna"}],
+        "codex-team": [dict(known)],
+        "codex-plus": [dict(known)],
+        "codex-pro": [dict(known)],
+    }
+
+
+def account_model(slug, plans=None, **extra):
+    model = {"slug": slug, "visibility": "list", "display_name": slug, "context_window": 500000,
+             "supported_reasoning_levels": [{"effort": e} for e in ("low", "medium", "high", "xhigh", "max", "ultra")]}
+    if plans is not None:
+        model["available_in_plans"] = plans
+    model.update(extra)
+    return model
+
+
+class RegistryMergeTest(unittest.TestCase):
+    def setUp(self):
+        self.catalog = load_module()
+
+    def ids(self, registry, section):
+        return [m.get("id") for m in registry[section]]
+
+    def test_new_model_goes_to_every_codex_section_its_plans_map_to(self):
+        registry = registry_with_codex_sections()
+        self.catalog.apply_current_gpt_models(registry, [account_model("gpt-6.2-sol", ["plus", "pro", "business"])])
+        for section in ("codex-team", "codex-plus", "codex-pro"):
+            self.assertIn("gpt-6.2-sol", self.ids(registry, section), section)
+        self.assertNotIn("gpt-6.2-sol", self.ids(registry, "codex-free"))
+        self.assertEqual(self.ids(registry, "claude"), ["claude-opus-5-5"])
+
+    def test_model_without_plan_list_goes_to_the_pro_section(self):
+        # The proxy serves unknown plans from codex-pro, so that is the safe default.
+        registry = registry_with_codex_sections()
+        self.catalog.apply_current_gpt_models(registry, [account_model("gpt-6.2-astra")])
+        self.assertIn("gpt-6.2-astra", self.ids(registry, "codex-pro"))
+        for section in ("codex-free", "codex-team", "codex-plus"):
+            self.assertNotIn("gpt-6.2-astra", self.ids(registry, section), section)
+
+    def test_new_model_lists_only_levels_the_proxy_parses(self):
+        registry = registry_with_codex_sections()
+        self.catalog.apply_current_gpt_models(registry, [account_model("gpt-6.2-sol", ["pro"])])
+        entry = next(m for m in registry["codex-pro"] if m["id"] == "gpt-6.2-sol")
+        self.assertEqual(entry["thinking"]["levels"], ["low", "medium", "high", "xhigh", "max"])
+
+    def test_known_model_context_is_raised_in_its_plan_sections(self):
+        registry = registry_with_codex_sections()
+        self.catalog.apply_current_gpt_models(registry, [account_model("gpt-6.1-sol", ["plus", "pro"])])
+        for section in ("codex-plus", "codex-pro"):
+            (entry,) = [m for m in registry[section] if m["id"] == "gpt-6.1-sol"]
+            self.assertEqual(entry["context_length"], 500000, section)
+        self.assertEqual(registry["codex-team"][0]["context_length"], 272000)
+
 
 if __name__ == "__main__":
     unittest.main()
