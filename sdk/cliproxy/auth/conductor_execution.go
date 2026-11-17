@@ -942,6 +942,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
 				finalErr = roundPickFailureError(lastErr, upstreamErr, errPick)
 			}
+			if isSchedulerRejectError(errPick) {
+				// A scheduler plugin rejected the pick: no recheck trial may
+				// route around it, and the round-ended marker must survive.
+				return cliproxyexecutor.Response{}, finalErr
+			}
 			var reselect bool
 			trial, auth, executor, provider, reselect = m.allCooledNext(ctx, allCooled, providers, routeModel, pickOpts, tried, errPick, finalErr)
 			if reselect {
@@ -1434,7 +1439,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 		}
 		var trial *allCooledTrial
-		if errPick != nil && !homeMode {
+		// A scheduler plugin reject skips the recheck round: no trial may route
+		// around it, and the block below returns it with the round-ended marker.
+		if errPick != nil && !homeMode && !isSchedulerRejectError(errPick) {
 			finalErr := errPick
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
 				finalErr = roundPickFailureError(lastErr, upstreamErr, errPick)

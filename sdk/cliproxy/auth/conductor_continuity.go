@@ -946,17 +946,6 @@ func isQuotaCooldownBlock(auth *Auth, checkModel string, now time.Time) bool {
 				if isModelStateActiveCooldown(state, now) && !isModelStateQuotaCooldown(state, now) {
 					return false
 				}
-				if modelForce := effectiveModelForceUntil(state); modelForce.After(now) && state.LastError != nil && !isQuotaCooldownLastError(state.LastError) && modelForce.After(state.quotaForceCooldownUntil) {
-					return false
-				}
-				if state.NextRetryAfter.After(auth.Quota.NextRecoverAt) {
-					if !state.Quota.Exceeded || isNonQuotaChallengeReason(state.Quota.Reason) {
-						return false
-					}
-					if !state.Quota.NextRecoverAt.IsZero() && state.NextRetryAfter.After(state.Quota.NextRecoverAt) && state.LastError != nil && !isQuotaCooldownLastError(state.LastError) {
-						return false
-					}
-				}
 			}
 		}
 		return true
