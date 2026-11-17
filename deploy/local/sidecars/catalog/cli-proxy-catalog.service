@@ -1,6 +1,6 @@
 [Unit]
 Description=Relabel CLIProxyAPI Codex model catalog (" · CLIP")
-After=proxd.service
+After=proxd-codex.service
 
 [Service]
 ExecStart=%h/bin/cli-proxy-catalog

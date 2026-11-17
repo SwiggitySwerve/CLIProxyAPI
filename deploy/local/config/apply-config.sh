@@ -207,5 +207,5 @@ echo "The proxy hot-reloads config.yaml (about a second): no restart is needed f
 echo "Check the reload:  podman logs --since 2m proxd-claude 2>&1 | grep 'config file changed'"
 echo "Check persistence: ls ~/.local/share/cli-proxy-claude/auth/*.cds   (one per cooled credential)"
 echo "If you want a restart anyway (not done by this script; wait until the .cds files exist):"
-echo "  systemctl --user restart proxd.service proxd-claude.service"
+echo "  systemctl --user restart proxd-codex.service proxd-claude.service"
 echo "Undo: $(cd "$(dirname "$0")" && pwd)/$(basename "$0") --rollback --from $BACKUP --apply"
