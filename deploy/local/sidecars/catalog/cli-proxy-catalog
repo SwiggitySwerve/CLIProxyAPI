@@ -163,8 +163,8 @@ def plan_sections(account_model: dict) -> list:
     """Registry sections serving the plans this model is offered on; codex-pro if it names none."""
     plans = account_model.get("available_in_plans")
     if not isinstance(plans, list):
-        return ["codex-pro"]
-    return sorted({PLAN_SECTIONS[plan] for plan in plans if plan in PLAN_SECTIONS})
+        plans = []
+    return sorted({PLAN_SECTIONS[plan] for plan in plans if plan in PLAN_SECTIONS}) or ["codex-pro"]
 
 
 def apply_current_gpt_models(catalog: dict, account_models: list) -> None:

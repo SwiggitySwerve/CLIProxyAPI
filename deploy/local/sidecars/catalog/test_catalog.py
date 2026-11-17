@@ -230,11 +230,13 @@ class RegistryMergeTest(unittest.TestCase):
 
     def test_model_without_plan_list_goes_to_the_pro_section(self):
         # The proxy serves unknown plans from codex-pro, so that is the safe default.
-        registry = registry_with_codex_sections()
-        self.catalog.apply_current_gpt_models(registry, [account_model("gpt-6.2-astra")])
-        self.assertIn("gpt-6.2-astra", self.ids(registry, "codex-pro"))
-        for section in ("codex-free", "codex-team", "codex-plus"):
-            self.assertNotIn("gpt-6.2-astra", self.ids(registry, section), section)
+        for name, plans in [("missing", None), ("empty", []), ("unmapped", ["enterprise"])]:
+            with self.subTest(name):
+                registry = registry_with_codex_sections()
+                self.catalog.apply_current_gpt_models(registry, [account_model("gpt-6.2-astra", plans)])
+                self.assertIn("gpt-6.2-astra", self.ids(registry, "codex-pro"))
+                for section in ("codex-free", "codex-team", "codex-plus"):
+                    self.assertNotIn("gpt-6.2-astra", self.ids(registry, section), section)
 
     def test_new_model_lists_only_levels_the_proxy_parses(self):
         registry = registry_with_codex_sections()
