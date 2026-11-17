@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -14,18 +13,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/providerspec"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kimi"
 	metaauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/meta"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/providerspec"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -1938,8 +1938,8 @@ func (h *Handler) restoreOverwrittenPluginRecord(ctx context.Context, rb savedPl
 			}
 		}
 	}
-	if len(rb.prevDiskBytes) > 0 && h.pluginHost != nil {
-		if restored := h.pluginHost.AuthDataToCoreAuth(pluginapi.AuthData{
+	if host := h.pluginHostSnapshot(); len(rb.prevDiskBytes) > 0 && host != nil {
+		if restored := host.AuthDataToCoreAuth(pluginapi.AuthData{
 			Provider:    restoreRecord.Provider,
 			ID:          restoreRecord.ID,
 			FileName:    restoreRecord.FileName,
