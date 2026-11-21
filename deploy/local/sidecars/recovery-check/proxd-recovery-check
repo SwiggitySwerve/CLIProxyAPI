@@ -2,9 +2,9 @@
 """Record a masked snapshot of every proxy credential's quota signals and cooldown
 deadlines, so quota incidents can be diagnosed after the fact.
 
-Run by a systemd timer (cli-proxy-recovery-check.timer). Each run does one read-only
+Run by a systemd timer (proxd-recovery-check.timer). Each run does one read-only
 GET /<management_path>/credentials per proxy instance and appends one JSON line to
-  ~/.local/share/cli-proxy-recovery-check/recovery.jsonl
+  ~/.local/share/proxd/recovery-check/recovery.jsonl
 (override with --out PATH). The file rotates to recovery.jsonl.1 above MAX_BYTES.
 
 Privacy: credentials are labelled by instance id and auth_index only (an opaque hash).
@@ -13,7 +13,8 @@ rate-limit response headers (Anthropic-Ratelimit-*, X-Codex-*, Retry-After) are 
 
 Instances come from the shared instance map (deploy/local/instances.example.json); the
 built-in values apply when the file is missing. The management key is read from the
-same file the rerank sidecar uses.
+same file the rerank sidecar uses. Overrides: PROXD_INSTANCES, PROXD_MANAGEMENT_KEY_FILE,
+each falling back to its pre-rename CLI_PROXY_* name.
 """
 import json
 import os
@@ -22,9 +23,15 @@ import time
 import urllib.request
 from pathlib import Path
 
-INSTANCES_FILE = Path(os.environ.get("CLI_PROXY_INSTANCES") or Path.home() / ".config/cli-proxy/instances.json")
-KEY_FILE = Path(os.environ.get("CLI_PROXY_MANAGEMENT_KEY_FILE") or Path.home() / ".config/cli-proxy-rerank/management-key")
-DEFAULT_OUT = Path.home() / ".local/share/cli-proxy-recovery-check/recovery.jsonl"
+
+def env(name):
+    """PROXD_<name>, else the pre-rename CLI_PROXY_<name>; None when neither is set."""
+    return os.environ.get(f"PROXD_{name}") or os.environ.get(f"CLI_PROXY_{name}")
+
+
+INSTANCES_FILE = Path(env("INSTANCES") or Path.home() / ".config/proxd/instances.json")
+KEY_FILE = Path(env("MANAGEMENT_KEY_FILE") or Path.home() / ".config/proxd/management-key")
+DEFAULT_OUT = Path.home() / ".local/share/proxd/recovery-check/recovery.jsonl"
 MAX_BYTES = 64 * 1024 * 1024
 BUILTIN_INSTANCES = [
     {"id": "claude-primary", "provider": "claude", "base_url": "http://127.0.0.1:8319", "management_path": "/v8/management"},

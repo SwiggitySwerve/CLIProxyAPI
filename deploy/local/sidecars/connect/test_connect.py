@@ -1,4 +1,4 @@
-"""Tests for cli-proxy-connect against a fake management API and exporter.
+"""Tests for proxd-connect against a fake management API and exporter.
 
 Run: python3 -I deploy/local/sidecars/connect/test_connect.py
 """
@@ -17,7 +17,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 HERE = Path(__file__).resolve().parent
-loader = importlib.machinery.SourceFileLoader("connect", str(HERE / "cli-proxy-connect"))
+loader = importlib.machinery.SourceFileLoader("connect", str(HERE / "proxd-connect"))
 spec = importlib.util.spec_from_loader("connect", loader)
 cc = importlib.util.module_from_spec(spec)
 loader.exec_module(cc)
@@ -111,8 +111,9 @@ class ConnectTest(unittest.TestCase):
             {"id": "claude-primary", "provider": "claude", "base_url": f"http://127.0.0.1:{self.port}"},
             {"id": "codex-primary", "provider": "codex", "base_url": "http://127.0.0.1:1"}]}))
         (d / "exporter.json").write_text(json.dumps({"listen": [["10.0.0.5", 9787], ["127.0.0.1", self.port]]}))
-        env = {"CLI_PROXY_INSTANCES": str(d / "instances.json"), "CLI_PROXY_MANAGEMENT_KEY_FILE": str(d / "key"),
-               "CLI_PROXY_EXPORTER_CONFIG": str(d / "exporter.json")}
+        self.dir = d
+        env = {"PROXD_INSTANCES": str(d / "instances.json"), "PROXD_MANAGEMENT_KEY_FILE": str(d / "key"),
+               "PROXD_EXPORTER_CONFIG": str(d / "exporter.json")}
         patch = unittest.mock.patch.dict(os.environ, env)
         patch.start()
         self.addCleanup(patch.stop)
@@ -150,6 +151,24 @@ class ConnectTest(unittest.TestCase):
         self.assertIn("[FAIL] exporter", out)
         FakeProxy.state["metrics"] = METRICS_LISTED
         code, out, _ = self.run_main("claude", "--credential", CRED["id"])
+        self.assertEqual(code, 0, out)
+
+    def test_exporter_accepts_either_metric_prefix(self):
+        for metrics in (METRICS_LISTED.replace("cliproxy_", "proxd_"), METRICS_LISTED):
+            FakeProxy.state["metrics"] = metrics
+            code, out, _ = self.run_main("claude", "--credential", CRED["id"])
+            self.assertEqual(code, 0, out)
+            self.assertIn("[  ok] exporter", out)
+
+    def test_pre_rename_env_names_still_apply(self):
+        d = self.dir
+        old = {"CLI_PROXY_INSTANCES": str(d / "instances.json"), "CLI_PROXY_MANAGEMENT_KEY_FILE": str(d / "key"),
+               "CLI_PROXY_EXPORTER_CONFIG": str(d / "exporter.json")}
+        with unittest.mock.patch.dict(os.environ, old):
+            for k in ("PROXD_INSTANCES", "PROXD_MANAGEMENT_KEY_FILE", "PROXD_EXPORTER_CONFIG"):
+                del os.environ[k]
+            self.assertEqual(cc.exporter_url(None), f"http://127.0.0.1:{self.port}/metrics")
+            code, out, _ = self.run_main("claude", "--credential", CRED["id"])
         self.assertEqual(code, 0, out)
 
     def test_no_exporter_skips_the_scrape(self):

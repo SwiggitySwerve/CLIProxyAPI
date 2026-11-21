@@ -99,7 +99,7 @@ io_gate() { # io_gate <step>: wait up to ten minutes for low IO pressure before 
   die "IO pressure stayed at or above $PSI_START for ten minutes; did not $1"
 }
 
-WORK=$(mktemp -d "$BUILD_TMP/cli-proxy-build.XXXXXX")
+WORK=$(mktemp -d "$BUILD_TMP/proxd-build.XXXXXX")
 # The Go module cache is read-only, so make it writable before removing it.
 trap 'chmod -R u+w "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 CACHE=${BUILD_CACHE_DIR:-$WORK/cache}

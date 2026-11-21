@@ -1,4 +1,4 @@
-"""Tests for cli-proxy-catalog. Run: python3 -m unittest deploy/local/sidecars/catalog/test_catalog.py
+"""Tests for proxd-catalog. Run: python3 -m unittest deploy/local/sidecars/catalog/test_catalog.py
 
 The sidecar must reach the ultrafast account only through the proxy's
 POST /v8/management/requests/api-call (token substituted by the proxy) and must
@@ -15,7 +15,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-SCRIPT = pathlib.Path(__file__).with_name("cli-proxy-catalog")
+SCRIPT = pathlib.Path(__file__).with_name("proxd-catalog")
 KEY = "test-management-key"
 CREDENTIAL = "codex-placeholder-target.json"
 ACCOUNT_ID = "acct-placeholder-0001"
@@ -24,7 +24,7 @@ MODELS = [{"slug": "gpt-9", "visibility": "list", "context_window": 123456}]
 
 
 def load_module():
-    loader = importlib.machinery.SourceFileLoader("cli_proxy_catalog_under_test", str(SCRIPT))
+    loader = importlib.machinery.SourceFileLoader("proxd_catalog_under_test", str(SCRIPT))
     spec = importlib.util.spec_from_loader(loader.name, loader)
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
@@ -123,10 +123,10 @@ class CatalogTest(unittest.TestCase):
         cfg.update(config or {})
         config_file = self.home / "catalog.json"
         config_file.write_text(json.dumps(cfg))
-        os.environ["CLI_PROXY_INSTANCES"] = str(instances)
-        os.environ["CLI_PROXY_CATALOG_CONFIG"] = str(config_file)
-        self.addCleanup(os.environ.pop, "CLI_PROXY_INSTANCES", None)
-        self.addCleanup(os.environ.pop, "CLI_PROXY_CATALOG_CONFIG", None)
+        os.environ["PROXD_INSTANCES"] = str(instances)
+        os.environ["PROXD_CATALOG_CONFIG"] = str(config_file)
+        self.addCleanup(os.environ.pop, "PROXD_INSTANCES", None)
+        self.addCleanup(os.environ.pop, "PROXD_CATALOG_CONFIG", None)
         return proxy, load_module()
 
     def test_fetches_models_through_api_call_with_token_placeholder(self):
@@ -148,7 +148,7 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(catalog.load_account_models(), MODELS)
         self.assertEqual([p for p in self.opened if "auth" in p.lower().replace("authorization", "")], [])
         source = SCRIPT.read_text()
-        for needle in ("access_token", "cli-proxy-api/auth", "ULTRAFAST_AUTH", "@"):
+        for needle in ("access_token", "cli-proxy-api/auth", "proxd/codex/auth", "ULTRAFAST_AUTH", "@"):
             self.assertNotIn(needle, source)
 
     def test_no_account_models_when_credential_is_unavailable(self):

@@ -1,0 +1,7 @@
+[Unit]
+Description=Observe ProxD account quotas (read-only)
+After=proxd-codex.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/bin/proxd-rerank

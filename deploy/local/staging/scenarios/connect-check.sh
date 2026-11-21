@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# connect-check.sh: runs the cli-proxy-connect sidecar against the staging stack.
+# connect-check.sh: runs the proxd-connect sidecar against the staging stack.
 #
 # The mock cannot complete a real OAuth login (Claude and Codex logins only exchange codes
 # with the real provider), so the login step is covered only as far as start, poll and
@@ -19,21 +19,21 @@ WORK=$(mktemp -d)
 EXPORTER_PORT=$((PROXY_PORT + 2))
 trap 'kill "${EXPORTER_PID:-0}" 2>/dev/null || true; rm -rf "$WORK"' EXIT
 
-mkdir -p "$WORK/home/.config/cli-proxy-rerank"
-mgmt_key > "$WORK/home/.config/cli-proxy-rerank/management-key"
-cp "$WORK/home/.config/cli-proxy-rerank/management-key" "$WORK/key"
+mkdir -p "$WORK/home/.config/proxd"
+mgmt_key > "$WORK/home/.config/proxd/management-key"
+cp "$WORK/home/.config/proxd/management-key" "$WORK/key"
 cat > "$WORK/instances.json" <<EOF
 {"instances": [{"id": "claude-staging", "provider": "claude", "base_url": "$(proxy_url)", "management_path": "/v8/management"}]}
 EOF
 echo "{\"listen\": [[\"127.0.0.1\", $EXPORTER_PORT]]}" > "$WORK/exporter.json"
-export CLI_PROXY_INSTANCES=$WORK/instances.json CLI_PROXY_MANAGEMENT_KEY_FILE=$WORK/key
-export CLI_PROXY_EXPORTER_CONFIG=$WORK/exporter.json
-HOME=$WORK/home CLI_PROXY_EXPORTER_LISTEN=127.0.0.1:$EXPORTER_PORT \
-  python3 -I "$SIDECARS/exporter/cli-proxy-exporter" >"$WORK/exporter.log" 2>&1 &
+export PROXD_INSTANCES=$WORK/instances.json PROXD_MANAGEMENT_KEY_FILE=$WORK/key
+export PROXD_EXPORTER_CONFIG=$WORK/exporter.json
+HOME=$WORK/home PROXD_EXPORTER_LISTEN=127.0.0.1:$EXPORTER_PORT \
+  python3 -I "$SIDECARS/exporter/proxd-exporter" >"$WORK/exporter.log" 2>&1 &
 EXPORTER_PID=$!
 wait_http "http://127.0.0.1:$EXPORTER_PORT/metrics" 20 || die "throwaway exporter did not start: $(cat "$WORK/exporter.log")"
 
-connect() { python3 -I "$SIDECARS/connect/cli-proxy-connect" claude "$@"; }
+connect() { python3 -I "$SIDECARS/connect/proxd-connect" claude "$@"; }
 mgmt_get() { curl -fsS -H "Authorization: Bearer $(mgmt_key)" "$(proxy_url)/v8/management$1"; }
 
 echo "== 1: healthy credential A =="

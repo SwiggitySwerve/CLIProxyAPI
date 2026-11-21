@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""Keep the Claude hub's cloaked Claude Code fingerprint on the current release.
+
+The hub (proxd-claude) sends its configured Claude Code fingerprint upstream for clients it
+can't verify, including T3 Code (entrypoint "t3-code"). Anthropic gates new models on that
+version ("Claude Code 2.1.280 does not support this model"), so a stale baseline blocks new
+models. This updates claude, measures the headers the real binary sends, and moves the hub's
+upstream.claude.header-defaults forward. It never downgrades and only edits its marked block.
+
+The block is marked "proxd-claude-ua-sync". A block with the pre-rename "cli-proxy-claude-ua-sync"
+markers is read the same way and replaced where it stands at the next update. A config that is
+already up to date is not rewritten just to rename the markers.
+
+The config is ~/.local/share/proxd/claude/config.yaml; PROXD_CLAUDE_CONFIG (or the pre-rename
+CLI_PROXY_CLAUDE_CONFIG) overrides it.
+"""
+import http.server, os, re, subprocess, sys, tempfile, threading, time
+from pathlib import Path
+
+HOME = Path.home()
+CONFIG = Path(os.environ.get("PROXD_CLAUDE_CONFIG") or os.environ.get("CLI_PROXY_CLAUDE_CONFIG")
+              or HOME / ".local/share/proxd/claude/config.yaml")
+CLAUDE = HOME / ".local/bin/claude"
+UNIT = "proxd-claude"
+BEGIN, END = "# BEGIN proxd-claude-ua-sync (managed, do not edit)", "# END proxd-claude-ua-sync"
+# A managed block: whole marker lines, current or pre-rename name, the same name at both ends,
+# and no other marker line in between.
+BLOCK_RE = re.compile(r"^# BEGIN (proxd|cli-proxy)-claude-ua-sync(?: \(managed, do not edit\))?\n"
+                      r"(?:(?!# (?:BEGIN|END) ).*\n)*?# END \1-claude-ua-sync$\n?", re.M)
+BUILTIN_BASELINE = "2.1.280"  # the image's compiled default when no block exists
+OS, ARCH = "MacOS", "arm64"   # keep the image's baseline platform; only the software version moves
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def probe():
+    """Run the real claude once against a local listener and return the headers it sent."""
+    caught = {}
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            if "/v1/messages" in self.path and not caught:
+                caught.update({k.lower(): v for k, v in self.headers.items()})
+            body = b'{"type":"error","error":{"type":"invalid_request_error","message":"probe"}}'
+            self.send_response(400)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        do_GET = do_POST
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    with tempfile.TemporaryDirectory() as home:
+        env = dict(os.environ, ANTHROPIC_BASE_URL=f"http://127.0.0.1:{srv.server_port}",
+                   ANTHROPIC_API_KEY="probe", CLAUDE_CONFIG_DIR=home, DISABLE_AUTOUPDATER="1",
+                   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1")
+        subprocess.run([str(CLAUDE.resolve()), "-p", "hi", "--max-turns", "1"], env=env, timeout=90,
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    srv.shutdown()
+    return caught
+
+
+def vtuple(v):
+    return tuple(int(x) for x in v.split("."))
+
+
+def current_baseline(text):
+    """The Claude Code version in the managed block (either marker name); the image default without one."""
+    block = BLOCK_RE.search(text)
+    cur = re.search(r'user-agent: "claude-cli/(\d+\.\d+\.\d+)', block.group(0)) if block else None
+    return cur.group(1) if cur else BUILTIN_BASELINE
+
+
+def with_block(text, block):
+    """text with the managed block (either marker name) replaced by block where it stands, or block
+    appended when there is none. Any further managed block is dropped, so one block remains."""
+    first = BLOCK_RE.search(text)
+    if not first:
+        return text.rstrip("\n") + "\n" + block
+    return text[:first.start()] + block + BLOCK_RE.sub("", text[first.end():])
+
+
+def main():
+    if "--no-update" not in sys.argv:
+        r = subprocess.run([str(CLAUDE), "update"], capture_output=True, text=True, timeout=300)
+        log(f"claude update: exit {r.returncode}: {(r.stdout or r.stderr).strip().splitlines()[-1:]}")
+
+    h = probe()
+    m = re.match(r"claude-cli/(\d+\.\d+\.\d+) ", h.get("user-agent", ""))
+    pkg, rt = h.get("x-stainless-package-version", ""), h.get("x-stainless-runtime-version", "")
+    if not (m and re.fullmatch(r"\d+\.\d+\.\d+", pkg) and re.fullmatch(r"v\d+\.\d+\.\d+", rt)):
+        # Only the fingerprint values and header names: other headers can carry credentials.
+        sys.exit(f"probe failed, nothing changed: user-agent {h.get('user-agent')!r}, package {pkg!r}, "
+                 f"runtime {rt!r}; headers seen: {sorted(h)}")
+    measured = m.group(1)
+
+    text = CONFIG.read_text()
+    if re.search(r"^upstream:", BLOCK_RE.sub("", text), re.M):
+        sys.exit("config.yaml has its own top-level upstream: key; merge header-defaults by hand")
+    current = current_baseline(text)
+    if vtuple(measured) <= vtuple(current):
+        log(f"up to date: hub baseline {current}, measured {measured}")
+        return
+
+    block = "\n".join([
+        BEGIN,
+        f"# {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}: measured from {CLAUDE.resolve()}",
+        "upstream:",
+        "    claude:",
+        "        server-side-fallback: true",
+        "        header-defaults:",
+        f'            user-agent: "claude-cli/{measured} (external, cli)"',
+        f'            package-version: "{pkg}"',
+        f'            runtime-version: "{rt}"',
+        f'            os: "{OS}"',
+        f'            arch: "{ARCH}"',
+        '            timeout: "600"',
+        END,
+    ]) + "\n"
+    new = with_block(text, block)
+    backup = CONFIG.with_name(f"config.yaml.bak-uasync-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}")
+    with os.fdopen(os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:  # holds the api keys
+        f.write(text)
+    since = time.strftime("%Y-%m-%dT%H:%M:%S")  # podman rejects a space between date and time
+    with open(CONFIG, "r+") as f:  # in place: the file is bind-mounted, a rename would not reach the container
+        f.write(new)
+        f.truncate()
+    log(f"hub baseline {current} -> {measured} (sdk {pkg}, runtime {rt}); backup {backup.name}")
+
+    for _ in range(15):
+        time.sleep(2)
+        out = subprocess.run(["podman", "logs", "--since", since, UNIT], capture_output=True, text=True).stdout
+        out += subprocess.run(["podman", "logs", "--since", since, UNIT], capture_output=True, text=True).stderr
+        if "configuration updated" in out:
+            log("hub hot-reloaded the config")
+            return
+    log("no hot-reload seen; restarting hub")
+    subprocess.run(["systemctl", "--user", "restart", UNIT], check=True)
+
+
+if __name__ == "__main__":
+    main()

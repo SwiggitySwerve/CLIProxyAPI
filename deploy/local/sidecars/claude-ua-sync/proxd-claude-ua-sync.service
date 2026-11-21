@@ -1,0 +1,7 @@
+[Unit]
+Description=Move the Claude hub cloaking fingerprint to the current Claude Code release
+After=proxd-claude.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/bin/proxd-claude-ua-sync

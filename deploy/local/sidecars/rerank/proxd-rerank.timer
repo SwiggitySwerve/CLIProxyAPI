@@ -1,5 +1,5 @@
 [Unit]
-Description=Re-rank CLIProxyAPI accounts every 10 minutes
+Description=Re-rank ProxD accounts every 10 minutes
 
 [Timer]
 OnBootSec=2min

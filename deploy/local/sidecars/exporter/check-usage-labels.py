@@ -80,7 +80,7 @@ def main(argv=None):
     old.add_argument('--old-metrics-url', default='http://127.0.0.1:9787/metrics')
     parser.add_argument('--exporter-json', type=Path, help='saved /v1/exporter response, for offline checks')
     parser.add_argument('--usage-url', default='http://127.0.0.1:18320/v1/exporter')
-    parser.add_argument('--key-file', type=Path, default=Path.home()/'.config/cli-proxy-rerank/management-key')
+    parser.add_argument('--key-file', type=Path, default=Path.home()/'.config/proxd/management-key')
     args = parser.parse_args(argv)
     try:
         text = args.old_metrics.read_text() if args.old_metrics else read_url(args.old_metrics_url)

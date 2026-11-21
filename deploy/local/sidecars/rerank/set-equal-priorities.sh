@@ -7,12 +7,13 @@
 #   set-equal-priorities.sh --restore <file> [--apply]  put the saved priorities back
 #
 # Every run first reads the current priorities (GET) and saves them to
-#   ~/.local/share/cli-proxy-backups/<timestamp>/priorities-<instance-id>.json
-# (override the root with CLI_PROXY_BACKUPS). That file is what --restore takes.
+#   ~/.local/share/proxd/backups/<timestamp>/priorities-<instance-id>.json
+# (override the root with PROXD_BACKUPS). That file is what --restore takes.
 # Dry-run is the default: only GETs are issued and the planned changes are printed.
 # --apply sends one PATCH /credentials/fields per credential that needs changing.
-# The instance comes from ~/.config/cli-proxy/instances.json (CLI_PROXY_INSTANCES);
-# the management key from ~/.config/cli-proxy-rerank/management-key and is never printed.
+# The instance comes from ~/.config/proxd/instances.json (PROXD_INSTANCES);
+# the management key from ~/.config/proxd/management-key (PROXD_MANAGEMENT_KEY_FILE) and is
+# never printed. Each PROXD_* variable falls back to its pre-rename CLI_PROXY_* name.
 SELF=$0 exec python3 - "$@" <<'PY'
 import json
 import os
@@ -22,9 +23,16 @@ import urllib.request
 from pathlib import Path
 
 HOME = Path.home()
-INSTANCES = Path(os.environ.get("CLI_PROXY_INSTANCES") or HOME / ".config/cli-proxy/instances.json")
-KEY_FILE = Path(os.environ.get("CLI_PROXY_MANAGEMENT_KEY_FILE") or HOME / ".config/cli-proxy-rerank/management-key")
-BACKUPS = Path(os.environ.get("CLI_PROXY_BACKUPS") or HOME / ".local/share/cli-proxy-backups")
+
+
+def env_path(name, default):
+    """PROXD_<name>, else the pre-rename CLI_PROXY_<name>, else the default path."""
+    return Path(os.environ.get(f"PROXD_{name}") or os.environ.get(f"CLI_PROXY_{name}") or default)
+
+
+INSTANCES = env_path("INSTANCES", HOME / ".config/proxd/instances.json")
+KEY_FILE = env_path("MANAGEMENT_KEY_FILE", HOME / ".config/proxd/management-key")
+BACKUPS = env_path("BACKUPS", HOME / ".local/share/proxd/backups")
 BUILTIN = [{"id": "claude-primary", "provider": "claude", "base_url": "http://127.0.0.1:8319", "management_path": "/v8/management"}]
 
 

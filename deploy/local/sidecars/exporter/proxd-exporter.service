@@ -1,9 +1,9 @@
 [Unit]
-Description=Relabel CLIProxyAPI Codex model catalog (" · CLIP")
+Description=Prometheus exporter for ProxD usage, quota and health
 After=proxd-codex.service
 
 [Service]
-ExecStart=%h/bin/cli-proxy-catalog
+ExecStart=%h/bin/proxd-exporter
 Restart=always
 RestartSec=5
 

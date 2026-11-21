@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# Install the local sidecars (rerank, exporter, recovery-check, catalog, connect) and their systemd units to their live
-# locations. Shows a diff for every file first; with --apply, backs the originals up to
-#   ~/.local/share/cli-proxy-backups/<timestamp>/   (undo with rollback.sh)
+# Install the local sidecars (rerank, exporter, recovery-check, catalog, connect, claude-ua-sync) and their
+# systemd units to their live locations as proxd-*. Shows a diff for every file first; with --apply, backs the
+# originals up to
+#   ~/.local/share/proxd/backups/<timestamp>/   (undo with rollback.sh)
 # and then copies. Dry-run is the default: nothing is written without --apply.
 #
-# This script never restarts, enables or disables a unit. After --apply, run
-#   systemctl --user daemon-reload
-#   systemctl --user restart cli-proxy-exporter   # the exporter reads its code at start
-#   systemctl --user restart cli-proxy-catalog    # likewise the catalog; it also needs catalog.json (see catalog/)
-# yourself; the rerank timer picks up the new script on its next run.
+# This script never restarts, enables or disables a unit, and leaves the pre-rename cli-proxy-* units
+# and scripts alone. After --apply it prints the daemon-reload and the commands that move each
+# cli-proxy-* unit to its proxd-* unit; run them yourself when you choose (the cutover).
+# Once the proxd-* units run, re-installing only needs a restart of proxd-exporter and proxd-catalog
+# (they read their code at start); the timers pick up new scripts on their next run.
 set -euo pipefail
 
 APPLY=0
@@ -16,7 +17,7 @@ for arg in "$@"; do
   case "$arg" in
     --apply) APPLY=1 ;;
     --dry-run) APPLY=0 ;;
-    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
     *) echo "unknown argument: $arg (use --dry-run or --apply)" >&2; exit 2 ;;
   esac
 done
@@ -25,25 +26,72 @@ SRC=$(cd "$(dirname "$0")" && pwd)
 LOCAL=$(cd "$SRC/.." && pwd)
 BIN="$HOME/bin"
 UNITS="$HOME/.config/systemd/user"
-CFG="$HOME/.config/cli-proxy"
+CFG="$HOME/.config/proxd"
 TS=$(date -u +%Y%m%dT%H%M%SZ)
-BACKUP="$HOME/.local/share/cli-proxy-backups/$TS"
+BACKUP="$HOME/.local/share/proxd/backups/$TS"
 MANIFEST="$BACKUP/install.manifest"
 
 # source|destination|mode  (rerank/ also holds any set-equal-priorities helper; it is not installed)
 FILES=(
-  "$SRC/rerank/cli-proxy-rerank|$BIN/cli-proxy-rerank|0700"
-  "$SRC/rerank/cli-proxy-rerank.service|$UNITS/cli-proxy-rerank.service|0644"
-  "$SRC/rerank/cli-proxy-rerank.timer|$UNITS/cli-proxy-rerank.timer|0644"
-  "$SRC/exporter/cli-proxy-exporter|$BIN/cli-proxy-exporter|0700"
-  "$SRC/exporter/cli-proxy-exporter.service|$UNITS/cli-proxy-exporter.service|0644"
-  "$SRC/recovery-check/cli-proxy-recovery-check|$BIN/cli-proxy-recovery-check|0700"
-  "$SRC/recovery-check/cli-proxy-recovery-check.service|$UNITS/cli-proxy-recovery-check.service|0644"
-  "$SRC/recovery-check/cli-proxy-recovery-check.timer|$UNITS/cli-proxy-recovery-check.timer|0644"
-  "$SRC/catalog/cli-proxy-catalog|$BIN/cli-proxy-catalog|0700"
-  "$SRC/catalog/cli-proxy-catalog.service|$UNITS/cli-proxy-catalog.service|0644"
-  "$SRC/connect/cli-proxy-connect|$BIN/cli-proxy-connect|0700"
+  "$SRC/rerank/proxd-rerank|$BIN/proxd-rerank|0700"
+  "$SRC/rerank/proxd-rerank.service|$UNITS/proxd-rerank.service|0644"
+  "$SRC/rerank/proxd-rerank.timer|$UNITS/proxd-rerank.timer|0644"
+  "$SRC/exporter/proxd-exporter|$BIN/proxd-exporter|0700"
+  "$SRC/exporter/proxd-exporter.service|$UNITS/proxd-exporter.service|0644"
+  "$SRC/recovery-check/proxd-recovery-check|$BIN/proxd-recovery-check|0700"
+  "$SRC/recovery-check/proxd-recovery-check.service|$UNITS/proxd-recovery-check.service|0644"
+  "$SRC/recovery-check/proxd-recovery-check.timer|$UNITS/proxd-recovery-check.timer|0644"
+  "$SRC/catalog/proxd-catalog|$BIN/proxd-catalog|0700"
+  "$SRC/catalog/proxd-catalog.service|$UNITS/proxd-catalog.service|0644"
+  "$SRC/connect/proxd-connect|$BIN/proxd-connect|0700"
+  "$SRC/claude-ua-sync/proxd-claude-ua-sync|$BIN/proxd-claude-ua-sync|0700"
+  "$SRC/claude-ua-sync/proxd-claude-ua-sync.service|$UNITS/proxd-claude-ua-sync.service|0644"
+  "$SRC/claude-ua-sync/proxd-claude-ua-sync.timer|$UNITS/proxd-claude-ua-sync.timer|0644"
 )
+
+# Pre-rename unit -> proxd unit. install.sh only prints these moves (print_cutover); it never runs them.
+CUTOVER=(
+  "cli-proxy-exporter.service|proxd-exporter.service"
+  "cli-proxy-catalog.service|proxd-catalog.service"
+  "cli-proxy-rerank.timer|proxd-rerank.timer"
+  "cli-proxy-recovery-check.timer|proxd-recovery-check.timer"
+  "cli-proxy-claude-ua-sync.timer|proxd-claude-ua-sync.timer"
+)
+wait_for() { # a shell loop that waits until a oneshot service neither runs nor has a queued job
+  # Fails closed: an unreadable state keeps it waiting.
+  echo "while s=\$(systemctl --user show -P ActiveState $1); [ -z \"\$s\" ] || [ \"\$s\" = activating ] || [ \"\$s\" = deactivating ] || ! j=\$(systemctl --user list-jobs --no-legend) || printf '%s\\n' \"\$j\" | grep -qw $1; do sleep 2; done"
+}
+print_cutover() {
+  echo "Cutover (not done by this script; run when you choose):"
+  echo "  systemctl --user daemon-reload"
+  if [ -d "$UNITS/cli-proxy-exporter.service.d" ] && [ ! -e "$UNITS/proxd-exporter.service.d" ]; then
+    echo "  cp -a $UNITS/cli-proxy-exporter.service.d $UNITS/proxd-exporter.service.d   # host drop-in, e.g. wait-cni0.conf"
+  fi
+  local entry old new
+  for entry in "${CUTOVER[@]}"; do
+    IFS='|' read -r old new <<< "$entry"
+    if [ -e "$UNITS/$old" ] && [ "$old" = cli-proxy-claude-ua-sync.timer ]; then
+      # Two syncs rewriting the bind-mounted config in place at once can corrupt it: let a running one finish.
+      echo "  systemctl --user disable --now $old && $(wait_for cli-proxy-claude-ua-sync.service) && systemctl --user enable --now $new"
+    elif [ -e "$UNITS/$old" ]; then
+      echo "  systemctl --user disable --now $old && systemctl --user enable --now $new"
+    else
+      echo "  systemctl --user enable --now $new"
+    fi
+  done
+  echo "Starting a timer whose OnBootSec has passed runs its service at once. proxd-claude-ua-sync then runs"
+  echo "claude update and, if the hub does not hot-reload its config, restarts proxd-claude: start that timer"
+  echo "when no Claude session on the hub would mind. The cli-proxy-* files stay in place for rollback."
+}
+
+# A host whose config is still in the pre-rename dir must move it to ~/.config/proxd first;
+# seeding here would shadow its instances.json and exporter.json (listen addresses).
+for f in instances.json exporter.json; do
+  if [ -e "$HOME/.config/cli-proxy/$f" ] && [ ! -e "$CFG/$f" ]; then
+    echo "~/.config/cli-proxy/$f exists but $CFG/$f does not: move it into $CFG first" >&2
+    exit 1
+  fi
+done
 
 # Config the scripts read. Created only when missing, never overwritten.
 SEEDS=()
@@ -57,11 +105,13 @@ if [ ! -e "$CFG/exporter.json" ]; then
   # Keep the exporter's current listen addresses: read them from the live script so that
   # the host-specific address never has to live in the repo.
   addrs=""
-  if [ -f "$BIN/cli-proxy-exporter" ]; then
-    addrs=$(grep -E '^LISTEN = ' "$BIN/cli-proxy-exporter" \
-      | grep -oE '\("[0-9.]+", [0-9]+\)' \
-      | sed -E 's/\("([0-9.]+)", ([0-9]+)\)/["\1", \2]/' | paste -sd, - || true)
-  fi
+  for live in "$BIN/proxd-exporter" "$BIN/cli-proxy-exporter"; do
+    if [ -z "$addrs" ] && [ -f "$live" ]; then
+      addrs=$(grep -E '^LISTEN = ' "$live" \
+        | grep -oE '\("[0-9.]+", [0-9]+\)' \
+        | sed -E 's/\("([0-9.]+)", ([0-9]+)\)/["\1", \2]/' | paste -sd, - || true)
+    fi
+  done
   if [ -z "$addrs" ]; then
     echo "note: no LISTEN found in the live exporter; exporter.json will listen on loopback only" >&2
     addrs='["127.0.0.1", 9787]'
@@ -98,13 +148,15 @@ done
 
 if [ "${#CHANGED[@]}" -eq 0 ]; then
   echo "Nothing to do."
+  print_cutover
   exit 0
 fi
 
 if [ "$APPLY" -ne 1 ]; then
   echo
   echo "DRY RUN: ${#CHANGED[@]} file(s) would be installed; originals would be backed up to $BACKUP"
-  echo "Re-run with --apply to proceed."
+  echo "Re-run with --apply to proceed. After it:"
+  print_cutover
   exit 0
 fi
 
@@ -126,6 +178,6 @@ for entry in "${CHANGED[@]}"; do
 done
 echo
 echo "Backup: $BACKUP"
-echo "Next (not done by this script): systemctl --user daemon-reload && systemctl --user restart cli-proxy-exporter cli-proxy-catalog"
-echo "Recovery check, first install only: systemctl --user enable --now cli-proxy-recovery-check.timer"
+print_cutover
+echo "Already cut over: systemctl --user daemon-reload && systemctl --user restart proxd-exporter proxd-catalog"
 echo "Undo:  $SRC/rollback.sh --from $BACKUP --apply"

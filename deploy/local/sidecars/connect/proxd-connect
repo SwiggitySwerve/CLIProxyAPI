@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Connect an account to a proxy instance and verify it end to end.
 
-usage: cli-proxy-connect <provider> [instance] [--credential ID] [--model M]
+usage: proxd-connect <provider> [instance] [--credential ID] [--model M]
                          [--no-exporter | --exporter-url URL] [--timeout SECONDS]
 
 Steps (each prints ok / FAIL / skip):
@@ -12,8 +12,9 @@ Steps (each prints ok / FAIL / skip):
   2. verify    POST /credentials/verify: one account-pinned, 1-token inference.
   3. listing   print id, auth_index, models, quota windows with observed_at and the
                cooldown state from GET /credentials.
-  4. exporter  one GET /metrics must list the credential (cliproxy_credential_state with
-               its instance and auth_index). Skipped with --no-exporter.
+  4. exporter  one GET /metrics must list the credential (proxd_credential_state, or the
+               pre-rename cliproxy_credential_state, with its instance and auth_index).
+               Skipped with --no-exporter.
 
 Safe by default: the only writes are the OAuth login itself and the 1-token verify
 inference. It never edits config, priorities, exclusions or auth files; the proxy writes
@@ -23,8 +24,8 @@ ran passed (2 for usage errors).
 --credential ID checks a credential that already exists (id, name or auth_index from the
 listing) and skips the login. Instances come from the shared instance map
 (deploy/local/instances.example.json); the management key is read from the file the other
-sidecars use. Environment overrides: CLI_PROXY_INSTANCES, CLI_PROXY_MANAGEMENT_KEY_FILE,
-CLI_PROXY_EXPORTER_CONFIG, CLI_PROXY_EXPORTER_LISTEN.
+sidecars use. Environment overrides: PROXD_INSTANCES, PROXD_MANAGEMENT_KEY_FILE,
+PROXD_EXPORTER_CONFIG, PROXD_EXPORTER_LISTEN; each falls back to its pre-rename CLI_PROXY_* name.
 """
 import argparse
 import json
@@ -44,7 +45,7 @@ BUILTIN_INSTANCES = [
     {"id": "codex-primary", "provider": "codex", "base_url": "http://127.0.0.1:8317", "management_path": "/v8/management"},
 ]
 POLL_SECONDS = 2
-# Quota signals as the proxy records them (same patterns as cli-proxy-exporter).
+# Quota signals as the proxy records them (same patterns as proxd-exporter).
 CLAUDE_SIGNAL = re.compile(r"^anthropic-ratelimit-unified-(?:(\w+)-)?(utilization|reset|status)$", re.I)
 CODEX_SIGNAL = re.compile(r"^x-codex-(primary|secondary)-(used-percent|reset-at)$", re.I)
 
@@ -53,12 +54,17 @@ class Failed(Exception):
     pass
 
 
+def env(name):
+    """PROXD_<name>, else the pre-rename CLI_PROXY_<name>; None when neither is set."""
+    return os.environ.get(f"PROXD_{name}") or os.environ.get(f"CLI_PROXY_{name}")
+
+
 def instances_file():
-    return Path(os.environ.get("CLI_PROXY_INSTANCES") or Path.home() / ".config/cli-proxy/instances.json")
+    return Path(env("INSTANCES") or Path.home() / ".config/proxd/instances.json")
 
 
 def key_file():
-    return Path(os.environ.get("CLI_PROXY_MANAGEMENT_KEY_FILE") or Path.home() / ".config/cli-proxy-rerank/management-key")
+    return Path(env("MANAGEMENT_KEY_FILE") or Path.home() / ".config/proxd/management-key")
 
 
 def load_instances():
@@ -85,14 +91,14 @@ def pick_instance(instances, provider, wanted):
 
 def exporter_url(override):
     """Metrics URL: --exporter-url, else the exporter's own listen config (same sources and
-    default as cli-proxy-exporter), preferring a loopback address."""
+    default as proxd-exporter), preferring a loopback address."""
     if override:
         return override
-    spec = os.environ.get("CLI_PROXY_EXPORTER_LISTEN")
+    spec = env("EXPORTER_LISTEN")
     if spec:
         listen = [(h, int(p)) for h, _, p in (s.strip().rpartition(":") for s in spec.split(","))]
     else:
-        path = Path(os.environ.get("CLI_PROXY_EXPORTER_CONFIG") or Path.home() / ".config/cli-proxy/exporter.json")
+        path = Path(env("EXPORTER_CONFIG") or Path.home() / ".config/proxd/exporter.json")
         try:
             listen = [(h, int(p)) for h, p in json.loads(path.read_text())["listen"]]
         except FileNotFoundError:
@@ -249,11 +255,12 @@ def show_listing(proxy, cid):
 
 
 def exporter_lists(url, instance_id, auth_index):
-    """One scrape: the cliproxy_credential_state series for this credential, or None."""
+    """One scrape: the credential_state series for this credential, or None. The exporter publishes it
+    as proxd_credential_state and, until that prefix is retired, as cliproxy_credential_state."""
     with urllib.request.urlopen(url, timeout=30) as resp:
         text = resp.read().decode()
     for line in text.splitlines():
-        if (line.startswith("cliproxy_credential_state{") and f'instance="{instance_id}"' in line
+        if (line.startswith(("proxd_credential_state{", "cliproxy_credential_state{")) and f'instance="{instance_id}"' in line
                 and f'auth_index="{auth_index}"' in line):
             return line
     return None
@@ -314,7 +321,7 @@ def run(args):
 
 
 def main(argv):
-    p = argparse.ArgumentParser(prog="cli-proxy-connect", description="Connect an account to a proxy instance and verify it.")
+    p = argparse.ArgumentParser(prog="proxd-connect", description="Connect an account to a proxy instance and verify it.")
     p.add_argument("provider")
     p.add_argument("instance", nargs="?")
     p.add_argument("--credential", help="check an existing credential (id, name or auth_index) instead of logging in")

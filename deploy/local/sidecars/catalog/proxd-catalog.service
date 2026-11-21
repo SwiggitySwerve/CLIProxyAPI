@@ -1,0 +1,11 @@
+[Unit]
+Description=Relabel ProxD Codex model catalog (" · CLIP")
+After=proxd-codex.service
+
+[Service]
+ExecStart=%h/bin/proxd-catalog
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

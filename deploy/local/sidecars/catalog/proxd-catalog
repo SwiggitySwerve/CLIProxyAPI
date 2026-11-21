@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Relabel CLIProxyAPI's Codex model catalog so proxy models are recognisable.
+"""Relabel ProxD's Codex model catalog so proxy models are recognisable.
 
 Codex reads model names from `model_catalog_url`. This forwards GET /v1/models
 (with the caller's own Authorization header and query string) to the proxy and
@@ -12,7 +12,7 @@ proxy on :8317.
 
 It also serves GET /registry/models.json, the proxy's model registry source
 (config `models.catalog`): the live router-for-me/models catalog, any entry
-from ~/.config/cli-proxy-catalog/extra-models.json whose id upstream doesn't list
+from ~/.config/proxd/catalog/extra-models.json whose id upstream doesn't list
 yet, and listed GPT models from the ultrafast account that upstream does not have
 yet, added to each codex-<plan> section their available_in_plans maps to (codex-pro
 when the account lists no plans). Account metadata refreshes context length and
@@ -24,11 +24,13 @@ The ultrafast account's model list is fetched through the proxy, never with a
 token read from disk: POST <management>/requests/api-call with the credential's
 auth_index and "Authorization: Bearer $TOKEN$" (the proxy substitutes the token).
 This script opens no auth file. Everything host-specific is configuration:
-  instance map  ~/.config/cli-proxy/instances.json (CLI_PROXY_INSTANCES), the first
+  instance map  ~/.config/proxd/instances.json (PROXD_INSTANCES), the first
                 "codex" instance is the proxy to forward to and to call
-  catalog.json  ~/.config/cli-proxy-catalog/catalog.json (CLI_PROXY_CATALOG_CONFIG):
+  catalog.json  ~/.config/proxd/catalog/catalog.json (PROXD_CATALOG_CONFIG):
                 {"credential": "<auth file name of the ultrafast account>",
-                 "management_key_file": "<optional path, default: the rerank key>"}
+                 "management_key_file": "<optional path, default: the shared key,
+                                          ~/.config/proxd/management-key (PROXD_MANAGEMENT_KEY_FILE)>"}
+Each PROXD_* variable falls back to its pre-rename CLI_PROXY_* name.
 Without "credential" the account models are skipped and only upstream data is served.
 """
 import json
@@ -38,16 +40,22 @@ import urllib.request
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-INSTANCES_FILE = Path(os.environ.get("CLI_PROXY_INSTANCES") or Path.home() / ".config/cli-proxy/instances.json")
-CONFIG_FILE = Path(os.environ.get("CLI_PROXY_CATALOG_CONFIG") or Path.home() / ".config/cli-proxy-catalog/catalog.json")
-DEFAULT_KEY_FILE = Path.home() / ".config/cli-proxy-rerank/management-key"
+
+def env(name):
+    """PROXD_<name>, else the pre-rename CLI_PROXY_<name>; None when neither is set."""
+    return os.environ.get(f"PROXD_{name}") or os.environ.get(f"CLI_PROXY_{name}")
+
+
+INSTANCES_FILE = Path(env("INSTANCES") or Path.home() / ".config/proxd/instances.json")
+CONFIG_FILE = Path(env("CATALOG_CONFIG") or Path.home() / ".config/proxd/catalog/catalog.json")
+DEFAULT_KEY_FILE = Path(env("MANAGEMENT_KEY_FILE") or Path.home() / ".config/proxd/management-key")
 BUILTIN_INSTANCES = [
     {"id": "codex-primary", "provider": "codex", "base_url": "http://127.0.0.1:8317", "management_path": "/v8/management"},
 ]
 SUFFIX = " · CLIP"
 FORWARD_HEADERS = ("Authorization", "User-Agent", "originator", "Accept", "version")
 REGISTRY_UPSTREAM = "https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/models.json"
-EXTRA_MODELS = Path.home() / ".config/cli-proxy-catalog/extra-models.json"
+EXTRA_MODELS = Path.home() / ".config/proxd/catalog/extra-models.json"
 CODEX_REGISTRY_UPSTREAM = "https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/codex_client_models.json"
 # The account catalog hides models whose minimal_client_version is above this (gpt-6.2-* needs 0.166.0).
 CODEX_CLIENT_VERSION = "0.169.0"
