@@ -67,7 +67,7 @@ deploy/local/staging/down.sh [--purge]   # --purge also deletes the data dir and
 ```
 
 All scripts are idempotent and refuse names or ports outside staging (for example 8317,
-8318, 8319, 9787, 18317).
+8318, 8319, 8321, 9787, 18317).
 
 Several stacks can run at once: set `STAGING_NAME=<name>` (`[a-z0-9]+`, not `mock` or
 `pod`) plus distinct `STAGING_PROXY_PORT` / `STAGING_MOCK_PORT` for every script, including

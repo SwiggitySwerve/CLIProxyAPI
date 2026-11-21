@@ -77,6 +77,13 @@ print_cutover() {
   echo "when no Claude session on the hub would mind. The cli-proxy-* files stay in place for rollback."
 }
 
+# A host that still has the pre-rename config dir must move it to ~/.config/proxd first;
+# seeding here would shadow its instances.json and exporter.json (listen addresses).
+if [ -d "$HOME/.config/cli-proxy" ] && [ ! -e "$CFG" ]; then
+  echo "~/.config/cli-proxy exists but $CFG does not: move it there first (mv, leaving a symlink)" >&2
+  exit 1
+fi
+
 # Config the scripts read. Created only when missing, never overwritten.
 SEEDS=()
 TMP=$(mktemp -d)

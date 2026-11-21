@@ -43,7 +43,7 @@ guard_ports() {
   local p
   for p in "$PROXY_PORT" "$MOCK_PORT"; do
     case "$p" in
-      8317|8318|8319|9787|18317) die "port $p belongs to the live deployment" ;;
+      8317|8318|8319|8321|9787|18317) die "port $p belongs to the live deployment" ;;
     esac
   done
   [ "$PROXY_PORT" != "$MOCK_PORT" ] || die "proxy and mock ports must differ"

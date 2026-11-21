@@ -47,6 +47,12 @@ class ManagedBlock(unittest.TestCase):
         self.assertEqual(out, BEFORE + NEW_BLOCK + AFTER)
         self.assertEqual(out.count("# BEGIN "), 1)
 
+    def test_markers_count_only_as_whole_lines_with_matching_names(self):
+        mention = "# notes: # BEGIN proxd-claude-ua-sync is managed\n"
+        self.assertEqual(ua.with_block(BEFORE + mention + AFTER, NEW_BLOCK), BEFORE + mention + AFTER + NEW_BLOCK)
+        mixed = old_block("2.1.290").replace("# END cli-proxy-", "# END proxd-")
+        self.assertIsNone(ua.BLOCK_RE.search(mixed))
+
     def test_no_block_is_appended_and_baseline_is_the_image_default(self):
         self.assertEqual(ua.current_baseline(BEFORE), ua.BUILTIN_BASELINE)
         self.assertEqual(ua.with_block(BEFORE + "\n\n", NEW_BLOCK), BEFORE + NEW_BLOCK)
@@ -68,6 +74,7 @@ class MainRewritesAnOldBlock(unittest.TestCase):
                     unittest.mock.patch("builtins.print"):
                 ua.main()
             commands = [c.args[0][:2] for c in run.call_args_list]
+            self.backup_modes = [p.stat().st_mode & 0o777 for p in Path(tmp).glob("config.yaml.bak-uasync-*")]
             return config.read_text(), commands
 
     def test_newer_release_rewrites_the_old_block_with_new_markers_and_no_restart(self):
@@ -77,6 +84,7 @@ class MainRewritesAnOldBlock(unittest.TestCase):
         self.assertEqual(out.count("ua-sync"), 2)  # one BEGIN and one END, none with the old name
         self.assertIn('user-agent: "claude-cli/2.1.300 (external, cli)"', out)
         self.assertNotIn(["systemctl", "--user"], commands)  # the hot reload was seen
+        self.assertEqual(self.backup_modes, [0o600])  # the backup holds the api keys
 
     def test_up_to_date_old_block_is_left_alone(self):
         text = BEFORE + old_block("2.1.300") + AFTER

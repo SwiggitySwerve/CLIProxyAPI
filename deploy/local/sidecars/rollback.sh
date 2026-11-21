@@ -68,6 +68,9 @@ else
   echo "Next (not done by this script): systemctl --user daemon-reload"
   echo "If the proxd-* units still run: systemctl --user restart proxd-exporter proxd-catalog"
   echo "If the proxd-* files were removed, go back to the pre-rename units (install.sh never removed them):"
+  echo "  First, if proxd-claude-ua-sync already wrote its block, give it the old markers back in place (same"
+  echo "  inode; the old sync refuses an unmarked upstream: block):"
+  echo "    f=~/.local/share/proxd/claude/config.yaml; sed 's/# \\(BEGIN\\|END\\) proxd-claude-ua-sync/# \\1 cli-proxy-claude-ua-sync/' \"\$f\" > \"\$f.tmp\" && cat \"\$f.tmp\" > \"\$f\" && rm \"\$f.tmp\""
   echo "  systemctl --user enable --now $OLD_UNITS"
   echo "  (starting cli-proxy-claude-ua-sync.timer runs the sync at once and can restart proxd-claude; pick a quiet moment)"
 fi

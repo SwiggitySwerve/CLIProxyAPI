@@ -14,7 +14,7 @@ already up to date is not rewritten just to rename the markers.
 The config is ~/.local/share/proxd/claude/config.yaml; PROXD_CLAUDE_CONFIG (or the pre-rename
 CLI_PROXY_CLAUDE_CONFIG) overrides it.
 """
-import http.server, json, os, re, subprocess, sys, tempfile, threading, time
+import http.server, os, re, subprocess, sys, tempfile, threading, time
 from pathlib import Path
 
 HOME = Path.home()
@@ -23,8 +23,8 @@ CONFIG = Path(os.environ.get("PROXD_CLAUDE_CONFIG") or os.environ.get("CLI_PROXY
 CLAUDE = HOME / ".local/bin/claude"
 UNIT = "proxd-claude"
 BEGIN, END = "# BEGIN proxd-claude-ua-sync (managed, do not edit)", "# END proxd-claude-ua-sync"
-# Any managed block, with the current or the pre-rename markers.
-BLOCK_RE = re.compile(r"# BEGIN (?:proxd|cli-proxy)-claude-ua-sync\b.*?# END (?:proxd|cli-proxy)-claude-ua-sync\n?", re.S)
+# A managed block: whole marker lines, current or pre-rename name, the same name at both ends.
+BLOCK_RE = re.compile(r"^# BEGIN (proxd|cli-proxy)-claude-ua-sync\b.*?^# END \1-claude-ua-sync\n?", re.S | re.M)
 BUILTIN_BASELINE = "2.1.280"  # the image's compiled default when no block exists
 OS, ARCH = "MacOS", "arm64"   # keep the image's baseline platform; only the software version moves
 
@@ -92,7 +92,9 @@ def main():
     m = re.match(r"claude-cli/(\d+\.\d+\.\d+) ", h.get("user-agent", ""))
     pkg, rt = h.get("x-stainless-package-version", ""), h.get("x-stainless-runtime-version", "")
     if not (m and re.fullmatch(r"\d+\.\d+\.\d+", pkg) and re.fullmatch(r"v\d+\.\d+\.\d+", rt)):
-        sys.exit(f"probe failed, nothing changed: {json.dumps(h)}")
+        # Only the fingerprint values and header names: other headers can carry credentials.
+        sys.exit(f"probe failed, nothing changed: user-agent {h.get('user-agent')!r}, package {pkg!r}, "
+                 f"runtime {rt!r}; headers seen: {sorted(h)}")
     measured = m.group(1)
 
     text = CONFIG.read_text()
@@ -120,7 +122,8 @@ def main():
     ]) + "\n"
     new = with_block(text, block)
     backup = CONFIG.with_name(f"config.yaml.bak-uasync-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}")
-    backup.write_text(text)
+    with os.fdopen(os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:  # holds the api keys
+        f.write(text)
     since = time.strftime("%Y-%m-%dT%H:%M:%S")  # podman rejects a space between date and time
     with open(CONFIG, "r+") as f:  # in place: the file is bind-mounted, a rename would not reach the container
         f.write(new)
