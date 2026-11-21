@@ -68,6 +68,11 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 	}
 	if len(fileHeaders) == 1 {
 		if _, errUpload := h.storeUploadedAuthFile(ctx, fileHeaders[0]); errUpload != nil {
+			var notAccepted *providerNotAcceptedError
+			if errors.As(errUpload, &notAccepted) {
+				c.JSON(http.StatusConflict, notAccepted.responseBody())
+				return
+			}
 			if errors.Is(errUpload, errAuthFileMustBeJSON) {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "file must be .json"})
 				return
@@ -132,6 +137,11 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		return
 	}
 	if err = h.writeAuthFile(ctx, filepath.Base(name), data); err != nil {
+		var notAccepted *providerNotAcceptedError
+		if errors.As(err, &notAccepted) {
+			c.JSON(http.StatusConflict, notAccepted.responseBody())
+			return
+		}
 		status := http.StatusInternalServerError
 		if errors.Is(err, errInvalidAuthFile) {
 			status = http.StatusBadRequest
@@ -305,6 +315,11 @@ func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) e
 	if err != nil {
 		return err
 	}
+	if auth != nil {
+		if errAccepted := h.checkAcceptedProvider(auth.Provider); errAccepted != nil {
+			return errAccepted
+		}
+	}
 	release := h.beginSIWCFileMutation(ctx, dst)
 	defer release()
 	if errWrite := h.writeAuthFileBytes(dst, data, auth); errWrite != nil {
@@ -336,6 +351,14 @@ func (h *Handler) writeAuthFileV8(ctx context.Context, name string, data []byte)
 	auths, metadata, errBuild := h.buildAuthsFromFileDataV8(dst, data)
 	if errBuild != nil {
 		return errBuild
+	}
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		if errAccepted := h.checkAcceptedProvider(auth.Provider); errAccepted != nil {
+			return errAccepted
+		}
 	}
 	needCodexLock := h.shouldLockCodexAuthFileV8(dst, metadata, auths)
 

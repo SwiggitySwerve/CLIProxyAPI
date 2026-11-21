@@ -400,29 +400,19 @@ func (h *Handler) StartOAuthV8(c *gin.Context) {
 
 	c.Set(oauthSessionProviderContextKey, provider)
 
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "":
+	trimmedProvider := strings.ToLower(strings.TrimSpace(provider))
+	if trimmedProvider == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "provider is required"})
-	case "claude":
-		h.RequestAnthropicToken(c)
-	case "codex":
-		h.RequestCodexToken(c)
-	case "antigravity":
-		h.RequestAntigravityToken(c)
-	case "kimi":
-		h.RequestKimiToken(c)
-	case "kimi-ai":
-		h.RequestKimiAIToken(c)
-	case "xai":
-		h.RequestXAIToken(c)
-	case "devin":
-		h.RequestDevinToken(c)
-	case "meta":
-		h.RequestMetaToken(c)
-	default:
-		if !h.ServePluginAuthURL(c) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "provider_not_found"})
-		}
+		return
+	}
+	if h.rejectIfProviderNotAccepted(c, trimmedProvider) {
+		return
+	}
+	if h.dispatchBuiltinOAuthV8(c, trimmedProvider) {
+		return
+	}
+	if !h.ServePluginAuthURL(c) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "provider_not_found"})
 	}
 }
 
@@ -529,9 +519,15 @@ func (h *Handler) oauthTargetProviderMatches(targetProvider, requestedProvider s
 
 // ImportOAuthV8 dispatches credential import using the provider query parameter.
 func (h *Handler) ImportOAuthV8(c *gin.Context) {
-	switch strings.ToLower(strings.TrimSpace(c.Query("provider"))) {
-	case "":
+	provider := strings.ToLower(strings.TrimSpace(c.Query("provider")))
+	if provider == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "provider is required"})
+		return
+	}
+	if h.rejectIfProviderNotAccepted(c, provider) {
+		return
+	}
+	switch provider {
 	case "vertex":
 		h.ImportVertexCredential(c)
 	default:

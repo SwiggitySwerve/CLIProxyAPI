@@ -61,6 +61,10 @@ func (s *Server) registerManagementV8Routes() {
 	v8.GET("/oauth/status", s.mgmt.GetAuthStatus)
 	v8.DELETE("/oauth/session", s.mgmt.CancelAuthSession)
 
+	v8.GET("/providers", s.mgmt.GetProviderCatalogV8)
+	v8.GET("/quota/providers", s.mgmt.GetQuotaProviders)
+	v8.POST("/quota/fetch", s.mgmt.FetchCredentialQuotaV8)
+
 	v8.GET("/plugins", s.mgmt.ListPlugins)
 	v8.DELETE("/plugins/:id", s.mgmt.DeletePlugin)
 	v8.GET("/plugins/store", s.mgmt.ListPluginStore)
