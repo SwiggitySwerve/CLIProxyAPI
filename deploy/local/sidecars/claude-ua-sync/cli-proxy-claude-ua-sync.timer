@@ -1,0 +1,9 @@
+[Unit]
+Description=Check hourly for a new Claude Code release and update the Claude hub fingerprint
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target
