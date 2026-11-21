@@ -1,4 +1,4 @@
-# cli-proxy-recovery-check
+# proxd-recovery-check
 
 Records a masked snapshot of every credential's quota signals and cooldown deadlines, so a
 quota incident (roadmap 1.4) can be diagnosed after the fact. The proxy's own error logs
@@ -7,12 +7,13 @@ quota signals in memory only.
 
 ## What it does
 
-A systemd user timer runs `cli-proxy-recovery-check` every 5 minutes. Each run sends one
+A systemd user timer runs `proxd-recovery-check` every 5 minutes. Each run sends one
 read-only `GET <base_url><management_path>/credentials` per instance in
-`~/.config/cli-proxy/instances.json` (schema: `deploy/local/instances.example.json`),
+`~/.config/proxd/instances.json` (schema: `deploy/local/instances.example.json`),
 using the management key the rerank sidecar uses, and appends one JSON line to
-`~/.local/share/cli-proxy-recovery-check/recovery.jsonl` (mode 600; rotates to
-`recovery.jsonl.1` above 64 MB). `--out PATH` writes elsewhere. It never calls a
+`~/.local/share/proxd/recovery-check/recovery.jsonl` (mode 600; rotates to
+`recovery.jsonl.1` above 64 MB). `--out PATH` writes elsewhere. `PROXD_INSTANCES` and
+`PROXD_MANAGEMENT_KEY_FILE` override the inputs (the pre-rename `CLI_PROXY_*` names still work). It never calls a
 mutating endpoint and never touches the proxy's data directories.
 
 Before this change the script (an earlier version, with no systemd unit referencing it)
@@ -68,12 +69,12 @@ a record. Signals are filtered by an allow-list of header names (`Anthropic-Rate
 ## Install
 
 `deploy/local/sidecars/install.sh` copies the script and the two unit files (dry run by
-default, backups to `~/.local/share/cli-proxy-backups/<timestamp>/`, undo with
+default, backups to `~/.local/share/proxd/backups/<timestamp>/`, undo with
 `rollback.sh`). It does not enable anything. On first install:
 
 ```bash
 systemctl --user daemon-reload
-systemctl --user enable --now cli-proxy-recovery-check.timer
+systemctl --user enable --now proxd-recovery-check.timer
 ```
 
 ## Read the data

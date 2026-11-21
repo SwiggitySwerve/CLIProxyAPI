@@ -1,9 +1,11 @@
 # Local deployment tooling
 
 Tools for building, testing and rolling the proxy (ProxD) on a single host with podman.
-The live services are `proxd-codex` (Codex, port 8317) and `proxd-claude` (Claude, port 8319).
-Their data directories, `~/.local/share/cli-proxy-api` and `~/.local/share/cli-proxy-claude`,
-and the image repository `localhost/cli-proxy-api` keep the upstream names.
+The live services are `proxd-codex` (Codex, port 8317), `proxd-claude` (Claude, port 8319)
+and `proxd-gemini` (Gemini, port 8321). Their data directories are
+`~/.local/share/proxd/{codex,claude,gemini}` and the image repository is `localhost/proxd`.
+Before the host cutover these were `~/.local/share/cli-proxy-{api,claude,gemini}` and
+`localhost/cli-proxy-api`; the cutover leaves symlinks and image tags at the old names.
 
 ```
 deploy/local/
@@ -13,8 +15,34 @@ deploy/local/
     up.sh down.sh status.sh logs.sh
     config.template.yaml proxy config template (placeholders only)
     mock/mock_upstream.py mock Anthropic + Codex upstream (Python stdlib)
-    scenarios/           end-to-end scripts; cooldown-basic.sh is the template, connect-check.sh covers cli-proxy-connect
+    scenarios/           end-to-end scripts; cooldown-basic.sh is the template, connect-check.sh covers proxd-connect
+  sidecars/              host sidecars installed to ~/bin and ~/.config/systemd/user as proxd-*
+    rerank/ exporter/ recovery-check/ catalog/ connect/ claude-ua-sync/
+    install.sh rollback.sh tidy-auth-backups.sh
+  config/                config hardening for the instances' config.yaml (apply-config.sh)
 ```
+
+## Sidecars after the ProxD rename
+
+The sidecars read and write the `proxd` layout:
+
+| What | Path | Override (pre-rename name still read) |
+| --- | --- | --- |
+| Instance map | `~/.config/proxd/instances.json` | `PROXD_INSTANCES` (`CLI_PROXY_INSTANCES`) |
+| Management key | `~/.config/proxd/management-key` | `PROXD_MANAGEMENT_KEY_FILE` (`CLI_PROXY_MANAGEMENT_KEY_FILE`) |
+| Exporter listen config | `~/.config/proxd/exporter.json` | `PROXD_EXPORTER_CONFIG`, `PROXD_EXPORTER_LISTEN` |
+| Plans | `~/.config/proxd/plans.json` | `PROXD_PLANS` |
+| Catalog config | `~/.config/proxd/catalog/{catalog,extra-models}.json` | `PROXD_CATALOG_CONFIG` (catalog.json) |
+| Instance data | `~/.local/share/proxd/{codex,claude,gemini}` | `PROXD_CLAUDE_CONFIG`, `PROXD_CODEX_AUTH_DIR` |
+| Rerank state, recovery log | `~/.local/share/proxd/{rerank,recovery-check}` | `PROXD_RERANK_STATE` |
+| Backups | `~/.local/share/proxd/backups/<timestamp>/` | `PROXD_BACKUPS`, `PROXD_BACKUP_ROOT` |
+
+`sidecars/install.sh` (dry run by default) installs the `proxd-*` scripts and units next to
+the old `cli-proxy-*` ones and never enables, disables or restarts a unit. It prints the
+cutover commands (`disable --now cli-proxy-<x>`, `enable --now proxd-<x>`) for you to run.
+The exporter publishes every metric as `cliproxy_*` and as `proxd_*` (see
+`sidecars/exporter/README.md`). Starting `proxd-claude-ua-sync.timer` runs the sync at once,
+which can restart `proxd-claude`.
 
 ## Staging
 
@@ -24,11 +52,11 @@ ports or data.
 
 | Thing | Name |
 | --- | --- |
-| Pod / containers | `cli-proxy-staging-pod`, `cli-proxy-staging`, `cli-proxy-staging-mock` |
+| Pod / containers | `proxd-staging-pod`, `proxd-staging`, `proxd-staging-mock` |
 | Proxy (host) | `127.0.0.1:18329` (`STAGING_PROXY_PORT`) |
 | Mock upstream and admin (host) | `127.0.0.1:18330` (`STAGING_MOCK_PORT`) |
-| Data, config, keys | `~/.local/share/cli-proxy-staging/` (`STAGING_DATA_DIR`) |
-| Image | `localhost/cli-proxy-api:staging-<shortsha>` (`-dirty` if the worktree has changes) |
+| Data, config, keys | `~/.local/share/proxd-staging/` (`STAGING_DATA_DIR`, must be named `proxd-staging*`) |
+| Image | `localhost/proxd:staging-<shortsha>` (`-dirty` if the worktree has changes) |
 
 ```bash
 deploy/local/staging/up.sh               # build the current worktree and start
@@ -43,9 +71,9 @@ All scripts are idempotent and refuse names or ports outside staging (for exampl
 
 Several stacks can run at once: set `STAGING_NAME=<name>` (`[a-z0-9]+`, not `mock` or
 `pod`) plus distinct `STAGING_PROXY_PORT` / `STAGING_MOCK_PORT` for every script, including
-`scenarios/*` and `bin/roll.sh staging`. The pod becomes `cli-proxy-staging-<name>-pod`, the
-containers `cli-proxy-staging-<name>` and `cli-proxy-staging-<name>-mock`, and the data dir
-defaults to `~/.local/share/cli-proxy-staging-<name>/`. Unset keeps the names above. `up.sh`
+`scenarios/*` and `bin/roll.sh staging`. The pod becomes `proxd-staging-<name>-pod`, the
+containers `proxd-staging-<name>` and `proxd-staging-<name>-mock`, and the data dir
+defaults to `~/.local/share/proxd-staging-<name>/`. Unset keeps the names above. `up.sh`
 refuses a concurrent run for the same name, and refuses a pod already owned by a different
 data dir or ports, so two agents cannot clobber each other's containers.
 
@@ -86,7 +114,7 @@ deploy/local/staging/scenarios/cooldown-basic.sh          # ~25s
 deploy/local/staging/scenarios/cooldown-basic.sh --quick  # skips the timing part
 ```
 
-`scenarios/connect-check.sh` exercises `sidecars/connect/cli-proxy-connect` (verify, listing,
+`scenarios/connect-check.sh` exercises `sidecars/connect/proxd-connect` (verify, listing,
 exporter check, and the login start/poll/cancel; a completed OAuth login is not covered).
 
 A scenario sources `scenarios/common.sh` (helpers: `mock_set`, `mock_log`,
@@ -98,7 +126,7 @@ first user text stay on one credential; pass different text to start a new sessi
 
 ```bash
 deploy/local/bin/build-image.sh --dry-run <git-ref|worktree> <image-ref>   # print the plan only
-VERSION=v8.0.65 deploy/local/bin/build-image.sh <git-ref> localhost/cli-proxy-api:v8.0.65-<shortsha>
+VERSION=v8.0.65 deploy/local/bin/build-image.sh <git-ref> localhost/proxd:v8.0.65-<shortsha>
 ```
 
 Build images with this script, not with a plain `podman build` of the Dockerfile. A plain

@@ -1,4 +1,4 @@
-# cli-proxy-connect
+# proxd-connect
 
 One command to connect an account to a proxy instance and prove it works (roadmap 3.1).
 Today a new credential means a login in the right container, then a hand-check of the
@@ -7,14 +7,14 @@ script does the login through the v8 management API and then reads back what the
 and the exporter say about the new credential.
 
 ```
-cli-proxy-connect <provider> [instance] [--credential ID] [--model M]
+proxd-connect <provider> [instance] [--credential ID] [--model M]
                   [--no-exporter | --exporter-url URL] [--timeout SECONDS]
 ```
 
 `provider` is the OAuth provider (`claude`, `codex`, ...). `instance` is an id from the
-instance map (`~/.config/cli-proxy/instances.json`, schema `deploy/local/instances.example.json`);
+instance map (`~/.config/proxd/instances.json`, schema `deploy/local/instances.example.json`);
 it may be omitted when exactly one instance serves the provider. The management key is
-read from the file the other sidecars use (`~/.config/cli-proxy-rerank/management-key`).
+read from the file the other sidecars use (`~/.config/proxd/management-key`).
 
 ## Steps
 
@@ -29,9 +29,9 @@ read from the file the other sidecars use (`~/.config/cli-proxy-rerank/managemen
    windows with `observed_at` (per-model windows only where they differ, for example
    `7d_oi`), and the cooldown state (`status`, `quota_blocked`, `next_retry_after`, every
    cooldown with scope, reason and deadline).
-4. **exporter**: one `GET /metrics` must contain `cliproxy_credential_state` for the
-   credential's instance and `auth_index`. The URL comes from the exporter's own config
-   (`~/.config/cli-proxy/exporter.json`, `CLI_PROXY_EXPORTER_LISTEN`; loopback listener
+4. **exporter**: one `GET /metrics` must contain `proxd_credential_state` (or the
+   pre-rename `cliproxy_credential_state`) for the credential's instance and `auth_index`. The URL comes from the exporter's own config
+   (`~/.config/proxd/exporter.json`, `PROXD_EXPORTER_LISTEN`; loopback listener
    preferred, default `127.0.0.1:9787`). `--exporter-url` overrides it; `--no-exporter`
    skips the step when no exporter is configured.
 
@@ -48,12 +48,13 @@ It prints the account email shown in the listing, so keep its output out of shar
 
 ## Install and test
 
-`deploy/local/sidecars/install.sh` copies it to `~/bin/cli-proxy-connect` (dry run by
+`deploy/local/sidecars/install.sh` copies it to `~/bin/proxd-connect` (dry run by
 default; undo with `rollback.sh`). Tests, no proxy needed:
 `python3 -I deploy/local/sidecars/connect/test_connect.py`. Against the staging stack:
 `deploy/local/staging/scenarios/connect-check.sh`. The staging mock cannot complete a real
 OAuth login, so that scenario covers login start, poll and cancel plus steps 2 to 4 on
 fake API-key credentials.
 
-Environment overrides: `CLI_PROXY_INSTANCES`, `CLI_PROXY_MANAGEMENT_KEY_FILE`,
-`CLI_PROXY_EXPORTER_CONFIG`, `CLI_PROXY_EXPORTER_LISTEN`.
+Environment overrides: `PROXD_INSTANCES`, `PROXD_MANAGEMENT_KEY_FILE`,
+`PROXD_EXPORTER_CONFIG`, `PROXD_EXPORTER_LISTEN`. Each pre-rename `CLI_PROXY_*` name is still
+read when the `PROXD_*` one is unset.

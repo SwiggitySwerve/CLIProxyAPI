@@ -31,8 +31,8 @@ logs each instance currently holds:
 
 | Instance | Avg error log | Largest | 500 files | Cap |
 | --- | --- | --- | --- | --- |
-| Claude (`cli-proxy-claude`) | 2.2 MB | 5.6 MB | about 1.1 GB (worst case 2.8 GB) | 1.5 GB |
-| Codex (`cli-proxy-api`) | 0.7 MB | 3.6 MB | about 0.36 GB (worst case 1.8 GB) | 1.5 GB |
+| Claude (`proxd/claude`, then `cli-proxy-claude`) | 2.2 MB | 5.6 MB | about 1.1 GB (worst case 2.8 GB) | 1.5 GB |
+| Codex (`proxd/codex`, then `cli-proxy-api`) | 0.7 MB | 3.6 MB | about 0.36 GB (worst case 1.8 GB) | 1.5 GB |
 
 The two caps bound the total at 3 GB (the disk has 59 GB free). Expected use is about
 1.5 GB for the error logs plus the existing main logs, which today fill roughly 100 MB
@@ -75,7 +75,7 @@ deploy/local/config/apply-config.sh --apply          # backs up, edits in place
 deploy/local/config/apply-config.sh --rollback --apply   # restores the newest backup
 ```
 
-Originals go to `~/.local/share/cli-proxy-backups/<timestamp>/` (`CLI_PROXY_BACKUP_ROOT`
+Originals go to `~/.local/share/proxd/backups/<timestamp>/` (`PROXD_BACKUP_ROOT`, or the pre-rename `CLI_PROXY_BACKUP_ROOT`,
 overrides the root). The script edits only the three keys, line by line, so comments and
 the managed UA-sync block in the Claude config stay as they are. It aborts if the layout is
 not the v8 nested one or if the edit would touch any other line. Use `--config PATH`

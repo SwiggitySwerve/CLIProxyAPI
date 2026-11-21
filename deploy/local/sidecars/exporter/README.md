@@ -1,5 +1,15 @@
 # Prox usage counter cutover (Step E only)
 
+> **Rename to ProxD (decision D3).** `proxd-exporter` publishes every series twice: under
+> its `cliproxy_*` name and again as `proxd_*`, with identical HELP, TYPE, labels and
+> values. The `proxd_*` block follows the whole `cliproxy_*` block in each scrape. Move
+> dashboards and alerts to `proxd_*`, then drop `cliproxy_*` once its history is past the
+> Prometheus retention window. The `cliproxy_*` names below describe the legacy half; each
+> has a `proxd_*` twin. Inputs: `~/.config/proxd/{instances.json,exporter.json,management-key,plans.json}`
+> and `~/.local/share/proxd/rerank/state.json`, overridable with `PROXD_INSTANCES`,
+> `PROXD_EXPORTER_CONFIG`, `PROXD_EXPORTER_LISTEN`, `PROXD_MANAGEMENT_KEY_FILE`, `PROXD_PLANS`
+> and `PROXD_RERANK_STATE` (each falls back to its `CLI_PROXY_*` name).
+
 The additive health PR (#51) keeps CPAMP counters during the dual run. This PR is
 the later swap: one authenticated `GET http://127.0.0.1:18320/v1/exporter` supplies
 canonical lifetime usage, using the same P4 pricing as Prox analytics. The shim
@@ -39,7 +49,7 @@ swap and label-set gate are unaffected.
 2. Deploy Prox #77. Install the private 0600 client alias file and approved rates.
    Ensure both loaded flags are true; retain the dual run while checking labels.
 3. **Block on any distinct label-set difference.** Before replacing the OLD
-   exporter, run this read-only check from the CLIProxyAPI repo on the host:
+   exporter, run this read-only check from the ProxD repo on the host:
 
    ```sh
    python3 deploy/local/sidecars/exporter/check-usage-labels.py \
@@ -47,7 +57,7 @@ swap and label-set gate are unaffected.
    ```
 
    It reads old request/token samples and Prox `/v1/exporter` (management key from
-   `~/.config/cli-proxy-rerank/management-key`). It compares distinct `account`,
+   `~/.config/proxd/management-key`). It compares distinct `account`,
    `client`, `provider` and `model` value sets, preserving visible escapes, case,
    whitespace and Unicode. Exit 0 is required. Exit 1 lists `only_old` and
    `only_prox` for every differing label; exit 2 means missing/invalid input or
