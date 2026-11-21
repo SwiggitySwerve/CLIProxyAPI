@@ -57,6 +57,9 @@ CUTOVER=(
   "cli-proxy-recovery-check.timer|proxd-recovery-check.timer"
   "cli-proxy-claude-ua-sync.timer|proxd-claude-ua-sync.timer"
 )
+wait_for() { # the shell loop that waits until a oneshot service is no longer running
+  echo "while [ \"\$(systemctl --user show -P ActiveState $1)\" = activating ]; do sleep 2; done"
+}
 print_cutover() {
   echo "Cutover (not done by this script; run when you choose):"
   echo "  systemctl --user daemon-reload"
@@ -66,7 +69,10 @@ print_cutover() {
   local entry old new
   for entry in "${CUTOVER[@]}"; do
     IFS='|' read -r old new <<< "$entry"
-    if [ -e "$UNITS/$old" ]; then
+    if [ -e "$UNITS/$old" ] && [ "$old" = cli-proxy-claude-ua-sync.timer ]; then
+      # Two syncs rewriting the bind-mounted config in place at once can corrupt it: let a running one finish.
+      echo "  systemctl --user disable --now $old && $(wait_for cli-proxy-claude-ua-sync.service) && systemctl --user enable --now $new"
+    elif [ -e "$UNITS/$old" ]; then
       echo "  systemctl --user disable --now $old && systemctl --user enable --now $new"
     else
       echo "  systemctl --user enable --now $new"
@@ -77,12 +83,14 @@ print_cutover() {
   echo "when no Claude session on the hub would mind. The cli-proxy-* files stay in place for rollback."
 }
 
-# A host that still has the pre-rename config dir must move it to ~/.config/proxd first;
+# A host whose config is still in the pre-rename dir must move it to ~/.config/proxd first;
 # seeding here would shadow its instances.json and exporter.json (listen addresses).
-if [ -d "$HOME/.config/cli-proxy" ] && [ ! -e "$CFG" ]; then
-  echo "~/.config/cli-proxy exists but $CFG does not: move it there first (mv, leaving a symlink)" >&2
-  exit 1
-fi
+for f in instances.json exporter.json; do
+  if [ -e "$HOME/.config/cli-proxy/$f" ] && [ ! -e "$CFG/$f" ]; then
+    echo "~/.config/cli-proxy/$f exists but $CFG/$f does not: move ~/.config/cli-proxy to $CFG first" >&2
+    exit 1
+  fi
+done
 
 # Config the scripts read. Created only when missing, never overwritten.
 SEEDS=()

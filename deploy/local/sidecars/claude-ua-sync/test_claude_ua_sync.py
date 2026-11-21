@@ -52,6 +52,10 @@ class ManagedBlock(unittest.TestCase):
         self.assertEqual(ua.with_block(BEFORE + mention + AFTER, NEW_BLOCK), BEFORE + mention + AFTER + NEW_BLOCK)
         mixed = old_block("2.1.290").replace("# END cli-proxy-", "# END proxd-")
         self.assertIsNone(ua.BLOCK_RE.search(mixed))
+        stray = "# BEGIN proxd-claude-ua-sync (managed, do not edit)\n"  # no END: never part of a block
+        self.assertEqual(ua.with_block(stray + BEFORE + old_block("2.1.290") + AFTER, NEW_BLOCK),
+                         stray + BEFORE + NEW_BLOCK + AFTER)
+        self.assertIsNone(ua.BLOCK_RE.search(old_block("2.1.290").replace("ua-sync (managed", "ua-sync-x (managed")))
 
     def test_no_block_is_appended_and_baseline_is_the_image_default(self):
         self.assertEqual(ua.current_baseline(BEFORE), ua.BUILTIN_BASELINE)

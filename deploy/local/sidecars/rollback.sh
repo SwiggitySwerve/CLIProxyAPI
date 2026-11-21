@@ -63,6 +63,8 @@ if [ "$APPLY" -ne 1 ]; then
   echo "If this undoes the first proxd install (proxd-* files listed as 'would remove') and the proxd-* units"
   echo "are running, stop them before --apply, while their unit files still exist:"
   echo "  systemctl --user disable --now $PROXD_UNITS"
+  echo "  while [ \"\$(systemctl --user show -P ActiveState proxd-claude-ua-sync.service)\" = activating ]; do sleep 2; done"
+  echo "  (a running sync must finish before anything else rewrites the Claude config)"
 else
   echo
   echo "Next (not done by this script): systemctl --user daemon-reload"
@@ -70,7 +72,7 @@ else
   echo "If the proxd-* files were removed, go back to the pre-rename units (install.sh never removed them):"
   echo "  First, if proxd-claude-ua-sync already wrote its block, give it the old markers back in place (same"
   echo "  inode; the old sync refuses an unmarked upstream: block):"
-  echo "    f=~/.local/share/proxd/claude/config.yaml; sed 's/# \\(BEGIN\\|END\\) proxd-claude-ua-sync/# \\1 cli-proxy-claude-ua-sync/' \"\$f\" > \"\$f.tmp\" && cat \"\$f.tmp\" > \"\$f\" && rm \"\$f.tmp\""
+  echo "    f=~/.local/share/proxd/claude/config.yaml; t=\$(mktemp) && sed 's/^# \\(BEGIN\\|END\\) proxd-claude-ua-sync\\( (managed, do not edit)\\)\\?\$/# \\1 cli-proxy-claude-ua-sync\\2/' \"\$f\" > \"\$t\" && cat \"\$t\" > \"\$f\"; rm -f \"\$t\""
   echo "  systemctl --user enable --now $OLD_UNITS"
   echo "  (starting cli-proxy-claude-ua-sync.timer runs the sync at once and can restart proxd-claude; pick a quiet moment)"
 fi

@@ -23,8 +23,10 @@ CONFIG = Path(os.environ.get("PROXD_CLAUDE_CONFIG") or os.environ.get("CLI_PROXY
 CLAUDE = HOME / ".local/bin/claude"
 UNIT = "proxd-claude"
 BEGIN, END = "# BEGIN proxd-claude-ua-sync (managed, do not edit)", "# END proxd-claude-ua-sync"
-# A managed block: whole marker lines, current or pre-rename name, the same name at both ends.
-BLOCK_RE = re.compile(r"^# BEGIN (proxd|cli-proxy)-claude-ua-sync\b.*?^# END \1-claude-ua-sync\n?", re.S | re.M)
+# A managed block: whole marker lines, current or pre-rename name, the same name at both ends,
+# and no other marker line in between.
+BLOCK_RE = re.compile(r"^# BEGIN (proxd|cli-proxy)-claude-ua-sync(?: \(managed, do not edit\))?\n"
+                      r"(?:(?!# (?:BEGIN|END) ).*\n)*?# END \1-claude-ua-sync$\n?", re.M)
 BUILTIN_BASELINE = "2.1.280"  # the image's compiled default when no block exists
 OS, ARCH = "MacOS", "arm64"   # keep the image's baseline platform; only the software version moves
 
