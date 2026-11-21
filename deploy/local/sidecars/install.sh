@@ -57,8 +57,9 @@ CUTOVER=(
   "cli-proxy-recovery-check.timer|proxd-recovery-check.timer"
   "cli-proxy-claude-ua-sync.timer|proxd-claude-ua-sync.timer"
 )
-wait_for() { # the shell loop that waits until a oneshot service is no longer running
-  echo "while [ \"\$(systemctl --user show -P ActiveState $1)\" = activating ]; do sleep 2; done"
+wait_for() { # a shell loop that waits until a oneshot service neither runs nor has a queued job
+  # Fails closed: an unreadable state keeps it waiting.
+  echo "while s=\$(systemctl --user show -P ActiveState $1); [ -z \"\$s\" ] || [ \"\$s\" = activating ] || [ \"\$s\" = deactivating ] || systemctl --user list-jobs --no-legend | grep -qw $1; do sleep 2; done"
 }
 print_cutover() {
   echo "Cutover (not done by this script; run when you choose):"
@@ -87,7 +88,7 @@ print_cutover() {
 # seeding here would shadow its instances.json and exporter.json (listen addresses).
 for f in instances.json exporter.json; do
   if [ -e "$HOME/.config/cli-proxy/$f" ] && [ ! -e "$CFG/$f" ]; then
-    echo "~/.config/cli-proxy/$f exists but $CFG/$f does not: move ~/.config/cli-proxy to $CFG first" >&2
+    echo "~/.config/cli-proxy/$f exists but $CFG/$f does not: move it into $CFG first" >&2
     exit 1
   fi
 done
