@@ -64,7 +64,7 @@ if [ "$APPLY" -ne 1 ]; then
   echo "are running, stop them before --apply, while their unit files still exist:"
   echo "  systemctl --user disable --now $PROXD_UNITS"
   u=proxd-claude-ua-sync.service  # wait until it neither runs nor has a queued job; an unreadable state keeps waiting
-  echo "  while s=\$(systemctl --user show -P ActiveState $u); [ -z \"\$s\" ] || [ \"\$s\" = activating ] || [ \"\$s\" = deactivating ] || systemctl --user list-jobs --no-legend | grep -qw $u; do sleep 2; done"
+  echo "  while s=\$(systemctl --user show -P ActiveState $u); [ -z \"\$s\" ] || [ \"\$s\" = activating ] || [ \"\$s\" = deactivating ] || ! j=\$(systemctl --user list-jobs --no-legend) || printf '%s\\n' \"\$j\" | grep -qw $u; do sleep 2; done"
   echo "  (a running sync must finish before anything else rewrites the Claude config)"
 else
   echo

@@ -59,7 +59,7 @@ CUTOVER=(
 )
 wait_for() { # a shell loop that waits until a oneshot service neither runs nor has a queued job
   # Fails closed: an unreadable state keeps it waiting.
-  echo "while s=\$(systemctl --user show -P ActiveState $1); [ -z \"\$s\" ] || [ \"\$s\" = activating ] || [ \"\$s\" = deactivating ] || systemctl --user list-jobs --no-legend | grep -qw $1; do sleep 2; done"
+  echo "while s=\$(systemctl --user show -P ActiveState $1); [ -z \"\$s\" ] || [ \"\$s\" = activating ] || [ \"\$s\" = deactivating ] || ! j=\$(systemctl --user list-jobs --no-legend) || printf '%s\\n' \"\$j\" | grep -qw $1; do sleep 2; done"
 }
 print_cutover() {
   echo "Cutover (not done by this script; run when you choose):"
