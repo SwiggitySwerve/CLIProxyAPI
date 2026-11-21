@@ -29,8 +29,7 @@ read from the file the other sidecars use (`~/.config/proxd/management-key`).
    windows with `observed_at` (per-model windows only where they differ, for example
    `7d_oi`), and the cooldown state (`status`, `quota_blocked`, `next_retry_after`, every
    cooldown with scope, reason and deadline).
-4. **exporter**: one `GET /metrics` must contain `proxd_credential_state` (or the
-   pre-rename `cliproxy_credential_state`) for the credential's instance and `auth_index`. The URL comes from the exporter's own config
+4. **exporter**: one `GET /metrics` must contain `proxd_credential_state` for the credential's instance and `auth_index`. The URL comes from the exporter's own config
    (`~/.config/proxd/exporter.json`, `PROXD_EXPORTER_LISTEN`; loopback listener
    preferred, default `127.0.0.1:9787`). `--exporter-url` overrides it; `--no-exporter`
    skips the step when no exporter is configured.

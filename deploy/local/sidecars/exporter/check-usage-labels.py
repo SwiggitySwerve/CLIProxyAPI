@@ -12,7 +12,7 @@ import urllib.request
 from pathlib import Path
 
 LABELS = ("account", "client", "provider", "model")
-SAMPLE = re.compile(r'^(cliproxy_requests_total|cliproxy_tokens_total)\{(.*)\}\s+\S+(?:\s+\d+)?$')
+SAMPLE = re.compile(r'^(proxd_requests_total|proxd_tokens_total)\{(.*)\}\s+\S+(?:\s+\d+)?$')
 LABEL = re.compile(r'([a-zA-Z_][a-zA-Z0-9_]*)="((?:\\.|[^"\\])*)"')
 
 

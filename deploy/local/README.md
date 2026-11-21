@@ -40,8 +40,7 @@ The sidecars read and write the `proxd` layout:
 `sidecars/install.sh` (dry run by default) installs the `proxd-*` scripts and units next to
 the old `cli-proxy-*` ones and never enables, disables or restarts a unit. It prints the
 cutover commands (`disable --now cli-proxy-<x>`, `enable --now proxd-<x>`) for you to run.
-The exporter publishes every metric as `cliproxy_*` and as `proxd_*` (see
-`sidecars/exporter/README.md`). Starting `proxd-claude-ua-sync.timer` runs the sync at once,
+The exporter publishes every metric as `proxd_*` (see `sidecars/exporter/README.md`). Starting `proxd-claude-ua-sync.timer` runs the sync at once,
 which can restart `proxd-claude`.
 
 ## Staging

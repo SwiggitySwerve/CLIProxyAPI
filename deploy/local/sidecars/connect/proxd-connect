@@ -12,8 +12,8 @@ Steps (each prints ok / FAIL / skip):
   2. verify    POST /credentials/verify: one account-pinned, 1-token inference.
   3. listing   print id, auth_index, models, quota windows with observed_at and the
                cooldown state from GET /credentials.
-  4. exporter  one GET /metrics must list the credential (proxd_credential_state, or the
-               pre-rename cliproxy_credential_state, with its instance and auth_index).
+  4. exporter  one GET /metrics must list the credential (proxd_credential_state with
+               its instance and auth_index).
                Skipped with --no-exporter.
 
 Safe by default: the only writes are the OAuth login itself and the 1-token verify
@@ -255,12 +255,11 @@ def show_listing(proxy, cid):
 
 
 def exporter_lists(url, instance_id, auth_index):
-    """One scrape: the credential_state series for this credential, or None. The exporter publishes it
-    as proxd_credential_state and, until that prefix is retired, as cliproxy_credential_state."""
+    """One scrape: the proxd_credential_state series for this credential, or None."""
     with urllib.request.urlopen(url, timeout=30) as resp:
         text = resp.read().decode()
     for line in text.splitlines():
-        if (line.startswith(("proxd_credential_state{", "cliproxy_credential_state{")) and f'instance="{instance_id}"' in line
+        if (line.startswith("proxd_credential_state{") and f'instance="{instance_id}"' in line
                 and f'auth_index="{auth_index}"' in line):
             return line
     return None

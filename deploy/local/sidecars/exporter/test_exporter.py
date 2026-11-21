@@ -99,20 +99,20 @@ class ExporterProxyTruth(unittest.TestCase):
 
         lab = 'instance="stub",provider="claude",auth_index='
         deadline = datetime(2098, 12, 31, 16, tzinfo=timezone.utc).timestamp() + 0.123456  # FAR_FUTURE in UTC
-        self.assertEqual(value(f"cliproxy_credential_available{{{lab}\"idle\"}}"), 1)
-        self.assertEqual(value(f"cliproxy_credential_available{{{lab}\"cool\"}}"), 0)
-        self.assertAlmostEqual(value(f"cliproxy_credential_next_retry_timestamp_seconds{{{lab}\"cool\"}}"), deadline, places=3)
-        self.assertTrue(any(l.startswith("cliproxy_credential_state{state=\"cooling\",status=\"error\"") for l in lines))
-        model_cd = [l for l in lines if l.startswith("cliproxy_credential_cooldown_retry_timestamp_seconds{")
+        self.assertEqual(value(f"proxd_credential_available{{{lab}\"idle\"}}"), 1)
+        self.assertEqual(value(f"proxd_credential_available{{{lab}\"cool\"}}"), 0)
+        self.assertAlmostEqual(value(f"proxd_credential_next_retry_timestamp_seconds{{{lab}\"cool\"}}"), deadline, places=3)
+        self.assertTrue(any(l.startswith("proxd_credential_state{state=\"cooling\",status=\"error\"") for l in lines))
+        model_cd = [l for l in lines if l.startswith("proxd_credential_cooldown_retry_timestamp_seconds{")
                     and 'scope="model"' in l and 'model="m1"' in l]
         self.assertEqual(len(model_cd), 1)
-        self.assertEqual(value(f"cliproxy_credential_quota_used_ratio{{{lab}\"idle\",model=\"all\",window=\"7d\"}}"), 0.5)
-        self.assertTrue(any(l.startswith("cliproxy_credential_quota_status_info{") and 'status="rejected"' in l
+        self.assertEqual(value(f"proxd_credential_quota_used_ratio{{{lab}\"idle\",model=\"all\",window=\"7d\"}}"), 0.5)
+        self.assertTrue(any(l.startswith("proxd_credential_quota_status_info{") and 'status="rejected"' in l
                             and 'model="m1"' in l for l in lines))
         # age is reported for the stale reading, and the new metrics carry no account names
-        self.assertGreater(value(f"cliproxy_credential_quota_age_seconds{{{lab}\"idle\",model=\"all\"}}"), 3600)
-        self.assertFalse([l for l in lines if l.startswith("cliproxy_credential_") and "@" in l
-                          and not l.startswith("cliproxy_credential_info")])
+        self.assertGreater(value(f"proxd_credential_quota_age_seconds{{{lab}\"idle\",model=\"all\"}}"), 3600)
+        self.assertFalse([l for l in lines if l.startswith("proxd_credential_") and "@" in l
+                          and not l.startswith("proxd_credential_info")])
 
 
 def load_exporter(home: Path):
@@ -183,50 +183,50 @@ class ExporterUsageCounters(unittest.TestCase):
         m = self.mod.Metrics()
         with patch.object(self.mod, "http_ok", return_value=(True, json.dumps(data).encode())):
             self.mod.collect_usage_health(m)
-        self.assertIn('cliproxy_usage_source_subscribed{instance="claude-primary"}', "\n".join(l[0] for l in m.lines if not isinstance(l, str)))
+        self.assertIn('proxd_usage_source_subscribed{instance="claude-primary"}', "\n".join(l[0] for l in m.lines if not isinstance(l, str)))
 
     def test_every_legacy_usage_series_keeps_its_name_labels_units_and_value(self):
         m, out = self.scrape()
         base = 'provider="claude",model="m1",account="acct",client="Work laptop",source="prox-usage-2"'
         expected = {
-            f'cliproxy_requests_total{{status="success",{base}}}': 5,
-            f'cliproxy_latency_seconds_sum{{{base}}}': 2.5,
-            f'cliproxy_latency_seconds_count{{{base}}}': 5,
-            f'cliproxy_ttft_seconds_sum{{{base}}}': 0.4,
-            f'cliproxy_ttft_seconds_count{{{base}}}': 2,
-            f'cliproxy_zero_token_success_total{{{base}}}': 1,
-            f'cliproxy_api_equivalent_cost_usd_total{{{base}}}': 1.25,
-            'cliproxy_last_request_timestamp_seconds{source="prox-usage-2"}': 1700000000.123,
-            'cliproxy_models_priced{source="prox-usage-2"}': 34,
-            'cliproxy_usage_unpriced_models{source="prox-usage-2"}': 0,
+            f'proxd_requests_total{{status="success",{base}}}': 5,
+            f'proxd_latency_seconds_sum{{{base}}}': 2.5,
+            f'proxd_latency_seconds_count{{{base}}}': 5,
+            f'proxd_ttft_seconds_sum{{{base}}}': 0.4,
+            f'proxd_ttft_seconds_count{{{base}}}': 2,
+            f'proxd_zero_token_success_total{{{base}}}': 1,
+            f'proxd_api_equivalent_cost_usd_total{{{base}}}': 1.25,
+            'proxd_last_request_timestamp_seconds{source="prox-usage-2"}': 1700000000.123,
+            'proxd_models_priced{source="prox-usage-2"}': 34,
+            'proxd_usage_unpriced_models{source="prox-usage-2"}': 0,
         }
         for kind, value in (("input", 123), ("output", 45), ("cached", 6), ("reasoning", 7)):
-            expected[f'cliproxy_tokens_total{{type="{kind}",{base}}}'] = value
+            expected[f'proxd_tokens_total{{type="{kind}",{base}}}'] = value
         for kind, value in (("read", 80), ("write", 9)):
-            expected[f'cliproxy_cache_tokens_total{{type="{kind}",{base}}}'] = value
-        self.assertEqual({k: v for k, v in out.items() if not k.startswith("cliproxy_usage_source_")}, expected)
-        self.assertIn('# TYPE cliproxy_requests_total counter', m.text())
-        self.assertIn('# TYPE cliproxy_models_priced gauge', m.text())
+            expected[f'proxd_cache_tokens_total{{type="{kind}",{base}}}'] = value
+        self.assertEqual({k: v for k, v in out.items() if not k.startswith("proxd_usage_source_")}, expected)
+        self.assertIn('# TYPE proxd_requests_total counter', m.text())
+        self.assertIn('# TYPE proxd_models_priced gauge', m.text())
 
     def test_failed_groups_add_to_shared_counters_without_adding_a_status_label(self):
         data = usage_payload()
         failed = copy.deepcopy(data["groups"][0]); failed["status"] = "failed"
         data["groups"].append(failed)
         _, out = self.scrape(data)
-        requests = {k: v for k, v in out.items() if k.startswith("cliproxy_requests_total")}
+        requests = {k: v for k, v in out.items() if k.startswith("proxd_requests_total")}
         self.assertEqual(len(requests), 2)
-        for name in ("cliproxy_tokens_total", "cliproxy_cache_tokens_total", "cliproxy_latency_seconds_sum"):
+        for name in ("proxd_tokens_total", "proxd_cache_tokens_total", "proxd_latency_seconds_sum"):
             self.assertTrue(all('status=' not in k for k in out if k.startswith(name)))
-        self.assertEqual(sum(v for k, v in out.items() if k.startswith("cliproxy_api_equivalent_cost_usd_total")), 2.5)
+        self.assertEqual(sum(v for k, v in out.items() if k.startswith("proxd_api_equivalent_cost_usd_total")), 2.5)
 
     def test_unpriced_cost_is_absent_and_explicit_zero_cost_is_preserved(self):
         data = usage_payload(); data["groups"][0]["cost_usd"] = None
         _, out = self.scrape(data)
-        self.assertFalse(any(k.startswith("cliproxy_api_equivalent_cost_usd_total") for k in out))
+        self.assertFalse(any(k.startswith("proxd_api_equivalent_cost_usd_total") for k in out))
         data["groups"][0]["cost_usd"] = 0
         _, out = self.scrape(data)
-        self.assertEqual(sum(v for k, v in out.items() if k.startswith("cliproxy_api_equivalent_cost_usd_total")), 0)
-        self.assertTrue(any(k.startswith("cliproxy_api_equivalent_cost_usd_total") for k in out))
+        self.assertEqual(sum(v for k, v in out.items() if k.startswith("proxd_api_equivalent_cost_usd_total")), 0)
+        self.assertTrue(any(k.startswith("proxd_api_equivalent_cost_usd_total") for k in out))
 
     def test_unpriced_models_with_traffic_are_counted_once_and_named(self):
         data = usage_payload()  # m1 is priced
@@ -237,11 +237,11 @@ class ExporterUsageCounters(unittest.TestCase):
         ):
             row = usage_group(); row.update(changes); data["groups"].append(row)
         m, out = self.scrape(data)
-        self.assertEqual(out['cliproxy_usage_unpriced_models{source="prox-usage-2"}'], 1)
-        info = {k: v for k, v in out.items() if k.startswith("cliproxy_usage_unpriced_model_info")}
-        self.assertEqual(info, {'cliproxy_usage_unpriced_model_info{provider="claude",model="m2",source="prox-usage-2"}': 1})
-        self.assertIn('# TYPE cliproxy_usage_unpriced_models gauge', m.text())
-        self.assertIn('# TYPE cliproxy_usage_unpriced_model_info gauge', m.text())
+        self.assertEqual(out['proxd_usage_unpriced_models{source="prox-usage-2"}'], 1)
+        info = {k: v for k, v in out.items() if k.startswith("proxd_usage_unpriced_model_info")}
+        self.assertEqual(info, {'proxd_usage_unpriced_model_info{provider="claude",model="m2",source="prox-usage-2"}': 1})
+        self.assertIn('# TYPE proxd_usage_unpriced_models gauge', m.text())
+        self.assertIn('# TYPE proxd_usage_unpriced_model_info gauge', m.text())
 
     def test_failed_requests_without_tokens_do_not_make_a_model_unpriced(self):
         # prox-usage reports no cost for a group with nothing to price (e.g. failed calls that used
@@ -255,18 +255,18 @@ class ExporterUsageCounters(unittest.TestCase):
         ):
             row = usage_group(); row.update(changes); data["groups"].append(row)
         _, out = self.scrape(data)
-        self.assertEqual(out['cliproxy_usage_unpriced_models{source="prox-usage-2"}'], 2)
-        info = {k for k in out if k.startswith("cliproxy_usage_unpriced_model_info")}
-        self.assertEqual(info, {'cliproxy_usage_unpriced_model_info{provider="claude",model="m5",source="prox-usage-2"}',
-                                'cliproxy_usage_unpriced_model_info{provider="claude",model="m6",source="prox-usage-2"}'})
+        self.assertEqual(out['proxd_usage_unpriced_models{source="prox-usage-2"}'], 2)
+        info = {k for k in out if k.startswith("proxd_usage_unpriced_model_info")}
+        self.assertEqual(info, {'proxd_usage_unpriced_model_info{provider="claude",model="m5",source="prox-usage-2"}',
+                                'proxd_usage_unpriced_model_info{provider="claude",model="m6",source="prox-usage-2"}'})
 
     def test_counters_are_transported_without_local_repricing_or_a_private_cache(self):
         first = usage_payload(); self.scrape(first)
         changed = usage_payload(); changed["groups"][0]["cost_usd"] = 3.75
         changed["groups"][0]["tokens"]["input"] = 2**40 + 1
         _, out = self.scrape(changed)
-        self.assertEqual(sum(v for k, v in out.items() if k.startswith("cliproxy_api_equivalent_cost_usd_total")), 3.75)
-        self.assertEqual(sum(v for k, v in out.items() if k.startswith("cliproxy_tokens_total{type=\"input\"")), 2**40 + 1)
+        self.assertEqual(sum(v for k, v in out.items() if k.startswith("proxd_api_equivalent_cost_usd_total")), 3.75)
+        self.assertEqual(sum(v for k, v in out.items() if k.startswith("proxd_tokens_total{type=\"input\"")), 2**40 + 1)
         source = SCRIPT.read_text()
         for removed in ("sqlite3", "usage_events", "load_prices", "api_key_aliases", "USAGE_GROUPS_SQL"):
             self.assertNotIn(removed, source)
@@ -305,27 +305,17 @@ class ExporterUsageCounters(unittest.TestCase):
             server.shutdown(); server.server_close(); thread.join()
         self.assertEqual(requests, [('/v1/exporter', 'Bearer test-key')])
 
-    def test_every_cliproxy_family_is_also_published_as_proxd_with_identical_series(self):
+    def test_every_family_is_published_once_as_proxd(self):
         m = self.mod.Metrics()
         with patch.object(self.mod, "http_ok", return_value=(True, json.dumps(usage_payload()).encode())):
             self.mod.collect_usage_health(m)
             self.mod.collect_usage(m)
         lines = m.text().splitlines()
-        by_prefix, order = {"cliproxy_": [], "proxd_": []}, []
-        for line in lines:
-            name = line.split(" ", 3)[2] if line.startswith("# ") else line
-            prefix = next(p for p in by_prefix if name.startswith(p))  # nothing else is published
-            by_prefix[prefix].append(line.replace(prefix, "", 1))
-            order.append(prefix)
-        # Same HELP, TYPE, series, labels and values (NaN included), in the same order.
-        self.assertEqual(by_prefix["proxd_"], by_prefix["cliproxy_"])
+        names = [line.split(" ", 3)[2] if line.startswith("# ") else line for line in lines]
+        self.assertTrue(names and all(n.startswith("proxd_") for n in names))  # no cliproxy_ copy
         self.assertIn('# TYPE proxd_requests_total counter', lines)
-        self.assertIn('proxd_usage_source_last_event_age_seconds{instance="codex-primary"} NaN', lines)
-        # All proxd_ lines follow all cliproxy_ lines, so neither block splits the other's families.
-        half = len(lines) // 2
-        self.assertEqual(order, ["cliproxy_"] * half + ["proxd_"] * half)
-        # The legacy series themselves are unchanged by the mirror.
-        self.assertEqual(sum(1 for l in lines if l.startswith("cliproxy_")), len(m.series))
+        self.assertEqual(sum(1 for l in lines if l.startswith("# TYPE ")), len(m.declared))  # one block per family
+        self.assertEqual(sum(1 for l in lines if not l.startswith("# ")), len(m.series))  # each series once
 
 
 def health_payload():
@@ -351,16 +341,16 @@ class ExporterUsageHealth(unittest.TestCase):
         get.assert_called_once_with('http://127.0.0.1:18320/v1/exporter', {'Authorization': 'Bearer test-key'}, timeout=4)
         values = {line[0]: line[1] for line in m.lines if isinstance(line, list)}
         self.assertEqual(set(values), {
-            'cliproxy_up{service="usage"}',
-            'cliproxy_usage_source_subscribed{instance="claude-primary"}',
-            'cliproxy_usage_source_subscribed{instance="codex-primary"}',
-            'cliproxy_usage_source_last_event_age_seconds{instance="claude-primary"}',
-            'cliproxy_usage_source_last_event_age_seconds{instance="codex-primary"}'})
-        self.assertEqual(values['cliproxy_up{service="usage"}'], 1)
-        self.assertEqual(values['cliproxy_usage_source_subscribed{instance="claude-primary"}'], 1)
-        self.assertEqual(values['cliproxy_usage_source_subscribed{instance="codex-primary"}'], 0)
-        self.assertEqual(values['cliproxy_usage_source_last_event_age_seconds{instance="claude-primary"}'], 1.5)
-        self.assertTrue(math.isnan(values['cliproxy_usage_source_last_event_age_seconds{instance="codex-primary"}']))
+            'proxd_up{service="usage"}',
+            'proxd_usage_source_subscribed{instance="claude-primary"}',
+            'proxd_usage_source_subscribed{instance="codex-primary"}',
+            'proxd_usage_source_last_event_age_seconds{instance="claude-primary"}',
+            'proxd_usage_source_last_event_age_seconds{instance="codex-primary"}'})
+        self.assertEqual(values['proxd_up{service="usage"}'], 1)
+        self.assertEqual(values['proxd_usage_source_subscribed{instance="claude-primary"}'], 1)
+        self.assertEqual(values['proxd_usage_source_subscribed{instance="codex-primary"}'], 0)
+        self.assertEqual(values['proxd_usage_source_last_event_age_seconds{instance="claude-primary"}'], 1.5)
+        self.assertTrue(math.isnan(values['proxd_usage_source_last_event_age_seconds{instance="codex-primary"}']))
         self.assertIn(' NaN', m.text())
 
     def health_values(self, data, raises=None):
@@ -380,18 +370,18 @@ class ExporterUsageHealth(unittest.TestCase):
                         "prune": {"last_success_seconds": None, "last_failure_seconds": None}}  # never ran
         data["jobs_outcome_error"] = True
         values = self.health_values(data)
-        self.assertEqual({k: v for k, v in values.items() if k.startswith("cliproxy_usage_job_")}, {
-            'cliproxy_usage_job_last_success_timestamp_seconds{kind="import"}': 1700000100.5,
-            'cliproxy_usage_job_last_failure_timestamp_seconds{kind="backup"}': 1700000200,
-            'cliproxy_usage_job_outcome_error': 1})
-        self.assertIn('cliproxy_usage_source_subscribed{instance="claude-primary"}', values)
+        self.assertEqual({k: v for k, v in values.items() if k.startswith("proxd_usage_job_")}, {
+            'proxd_usage_job_last_success_timestamp_seconds{kind="import"}': 1700000100.5,
+            'proxd_usage_job_last_failure_timestamp_seconds{kind="backup"}': 1700000200,
+            'proxd_usage_job_outcome_error': 1})
+        self.assertIn('proxd_usage_source_subscribed{instance="claude-primary"}', values)
         data["jobs_outcome_error"] = False
-        self.assertEqual(self.health_values(data)['cliproxy_usage_job_outcome_error'], 0)
+        self.assertEqual(self.health_values(data)['proxd_usage_job_outcome_error'], 0)
 
     def test_usage_service_without_job_fields_adds_no_job_series(self):
         values = self.health_values(health_payload())  # an older prox-usage has neither key
-        self.assertFalse(any(k.startswith("cliproxy_usage_job_") for k in values))
-        self.assertIn('cliproxy_usage_source_subscribed{instance="claude-primary"}', values)
+        self.assertFalse(any(k.startswith("proxd_usage_job_") for k in values))
+        self.assertIn('proxd_usage_source_subscribed{instance="claude-primary"}', values)
 
     def test_malformed_job_fields_keep_source_health_and_raise_the_flag(self):
         good = {"last_success_seconds": 1700000100, "last_failure_seconds": None}
@@ -407,19 +397,19 @@ class ExporterUsageHealth(unittest.TestCase):
                 data["jobs_outcome_error"] = False
                 data[key] = bad
                 values = self.health_values(data)  # does not raise: source health is independent
-                self.assertEqual(values['cliproxy_usage_source_subscribed{instance="claude-primary"}'], 1)
-                self.assertEqual(values['cliproxy_usage_source_subscribed{instance="codex-primary"}'], 0)
-                self.assertEqual(values['cliproxy_usage_source_last_event_age_seconds{instance="claude-primary"}'], 1.5)
+                self.assertEqual(values['proxd_usage_source_subscribed{instance="claude-primary"}'], 1)
+                self.assertEqual(values['proxd_usage_source_subscribed{instance="codex-primary"}'], 0)
+                self.assertEqual(values['proxd_usage_source_last_event_age_seconds{instance="claude-primary"}'], 1.5)
                 # The job block is all-or-nothing: no timestamps, and the failure is visible.
-                self.assertEqual({k: v for k, v in values.items() if k.startswith("cliproxy_usage_job_")},
-                                 {'cliproxy_usage_job_outcome_error': 1})
+                self.assertEqual({k: v for k, v in values.items() if k.startswith("proxd_usage_job_")},
+                                 {'proxd_usage_job_outcome_error': 1})
 
     def test_malformed_source_entry_still_rejects_the_health_block(self):
         data = health_payload()
         data["jobs"] = {"import": {"last_success_seconds": 1700000100, "last_failure_seconds": None}}
         data["jobs_outcome_error"] = False
         data["sources"][0]["subscribed"] = "yes"
-        self.assertEqual(set(self.health_values(data, raises=ValueError)), {'cliproxy_up{service="usage"}'})
+        self.assertEqual(set(self.health_values(data, raises=ValueError)), {'proxd_up{service="usage"}'})
 
     def test_slow_usage_read_has_one_deadline_and_other_collectors_still_render(self):
         release = threading.Event()
@@ -447,7 +437,7 @@ class ExporterUsageHealth(unittest.TestCase):
                 with patch('sys.stderr'):
                     start = time.monotonic(); text = self.mod.render(); elapsed = time.monotonic()-start
             self.assertLess(elapsed, 4.8)
-            self.assertIn('cliproxy_up{service="usage"} 0', text)
+            self.assertIn('proxd_up{service="usage"} 0', text)
             self.assertEqual(calls, ['usage', 'quota', 'credentials', 'plans'])
             self.assertEqual(seen, [('/v1/exporter', 'Bearer test-key')])
             self.assertNotIn('test-key', seen[0][0])
@@ -476,7 +466,7 @@ class ExporterCutoverReadiness(unittest.TestCase):
         payload=usage_payload(); payload['rate_book_error']=payload['client_alias_error']=True
         with patch.object(self.mod,'http_ok',return_value=(True,json.dumps(payload).encode())):
             m=self.mod.Metrics();self.mod.collect_usage(m)
-        self.assertTrue(any(line.startswith('cliproxy_requests_total') for line in m.text().splitlines()))
+        self.assertTrue(any(line.startswith('proxd_requests_total') for line in m.text().splitlines()))
 
     def test_startup_failure_marks_collector_failed_while_source_health_stays_available(self):
         self.mod.PROXIES={}
@@ -487,10 +477,10 @@ class ExporterCutoverReadiness(unittest.TestCase):
                  patch.object(self.mod,'collect_quota'),patch.object(self.mod,'collect_credentials'), \
                  patch.object(self.mod,'collect_plans'),patch('sys.stderr',new=io.StringIO()):
                 text=self.mod.render()
-            self.assertIn('cliproxy_exporter_collector_success{collector="usage"} 0',text)
-            self.assertIn('cliproxy_up{service="usage"} 1',text)
-            self.assertNotIn('cliproxy_requests_total',text)
-            self.assertNotIn('cliproxy_api_equivalent_cost_usd_total',text)
+            self.assertIn('proxd_exporter_collector_success{collector="usage"} 0',text)
+            self.assertIn('proxd_up{service="usage"} 1',text)
+            self.assertNotIn('proxd_requests_total',text)
+            self.assertNotIn('proxd_api_equivalent_cost_usd_total',text)
 
     def test_render_probes_no_dashboard_and_emits_no_dashboard_series(self):
         self.mod.PROXIES={'claude':('http://127.0.0.1:1','http://127.0.0.1:1/m','stub')}
@@ -505,8 +495,8 @@ class ExporterCutoverReadiness(unittest.TestCase):
         self.assertFalse(hasattr(self.mod,'DASHBOARD'))
         self.assertFalse([u for u in urls if '18317' in u or 'management.html' in u],urls)
         self.assertNotIn('service="dashboard"',text)
-        self.assertIn('cliproxy_up{service="proxy",proxy="claude"} 1',text)
-        self.assertIn('cliproxy_up{service="usage"} 1',text)
+        self.assertIn('proxd_up{service="proxy",proxy="claude"} 1',text)
+        self.assertIn('proxd_up{service="usage"} 1',text)
 
     def test_health_and_usage_share_one_request_and_only_counters_gain_source(self):
         with patch.object(self.mod,'http_ok',return_value=(True,json.dumps(usage_payload()).encode())) as get:
@@ -514,7 +504,7 @@ class ExporterCutoverReadiness(unittest.TestCase):
         self.assertEqual(get.call_count,1)
         for line in m.lines:
             if isinstance(line,list):
-                if line[0].startswith(('cliproxy_up{','cliproxy_usage_source_')):
+                if line[0].startswith(('proxd_up{','proxd_usage_source_')):
                     self.assertNotIn('source=',line[0])
                 else:
                     self.assertIn('source="prox-usage-2"',line[0])
@@ -548,7 +538,7 @@ class ExporterCutoverReadiness(unittest.TestCase):
         import re
         def label_values(series):
             return {key:value for key,value in re.findall(r'(provider|model|account|client)="([^"]*)"',series)}
-        actual=[label_values(line[0]) for line in m.lines if isinstance(line,list) and line[0].startswith('cliproxy_requests_total{')]
+        actual=[label_values(line[0]) for line in m.lines if isinstance(line,list) and line[0].startswith('proxd_requests_total{')]
         self.assertEqual(actual,old)
 
 
@@ -564,8 +554,8 @@ class ExporterLabelGate(unittest.TestCase):
     def check(self, old, prox):
         m=self.mod.Metrics()
         for row in old:
-            m.add('cliproxy_requests_total','counter','Requests',1,status='success',**row)
-            m.add('cliproxy_tokens_total','counter','Tokens',1,type='input',**row)
+            m.add('proxd_requests_total','counter','Requests',1,status='success',**row)
+            m.add('proxd_tokens_total','counter','Tokens',1,type='input',**row)
         metrics=self.root/'old.prom';metrics.write_text(m.text())
         payload=usage_payload();payload['groups']=[]
         for labels in prox:

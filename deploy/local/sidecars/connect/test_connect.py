@@ -89,8 +89,8 @@ class FakeProxy(BaseHTTPRequestHandler):
         pass
 
 
-METRICS_LISTED = ('# TYPE cliproxy_credential_state gauge\n'
-                  'cliproxy_credential_state{instance="claude-primary",provider="claude",'
+METRICS_LISTED = ('# TYPE proxd_credential_state gauge\n'
+                  'proxd_credential_state{instance="claude-primary",provider="claude",'
                   'auth_index="0123456789abcdef",state="available",status="active"} 1\n')
 
 
@@ -152,13 +152,6 @@ class ConnectTest(unittest.TestCase):
         FakeProxy.state["metrics"] = METRICS_LISTED
         code, out, _ = self.run_main("claude", "--credential", CRED["id"])
         self.assertEqual(code, 0, out)
-
-    def test_exporter_accepts_either_metric_prefix(self):
-        for metrics in (METRICS_LISTED.replace("cliproxy_", "proxd_"), METRICS_LISTED):
-            FakeProxy.state["metrics"] = metrics
-            code, out, _ = self.run_main("claude", "--credential", CRED["id"])
-            self.assertEqual(code, 0, out)
-            self.assertIn("[  ok] exporter", out)
 
     def test_pre_rename_env_names_still_apply(self):
         d = self.dir
