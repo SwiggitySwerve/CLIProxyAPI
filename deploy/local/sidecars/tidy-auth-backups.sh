@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Move *.bak* clutter out of the watched proxy directories
-#   ~/.local/share/cli-proxy-{api,claude}/auth/   and   ~/.local/share/cli-proxy-{api,claude}/
-# into ~/.local/share/cli-proxy-backups/<timestamp>/ (mirroring the directory layout), so the
+#   ~/.local/share/proxd/{codex,claude,gemini}/auth/   and   ~/.local/share/proxd/{codex,claude,gemini}/
+# into ~/.local/share/proxd/backups/<timestamp>/ (mirroring the directory layout), so the
 # auth watcher stops seeing them. Dry-run is the default: nothing moves without --apply.
 #
 # Safety: only regular files whose name contains ".bak" and does not end in ".json" are
@@ -22,10 +22,10 @@ done
 
 DATA="$HOME/.local/share"
 TS=$(date -u +%Y%m%dT%H%M%SZ)
-BACKUP="$DATA/cli-proxy-backups/$TS"
+BACKUP="$DATA/proxd/backups/$TS"
 
 FOUND=()
-for inst in "$DATA"/cli-proxy-api "$DATA"/cli-proxy-claude; do
+for inst in "$DATA"/proxd/codex "$DATA"/proxd/claude "$DATA"/proxd/gemini; do
   [ -d "$inst" ] || continue
   for dir in "$inst" "$inst/auth"; do
     [ -d "$dir" ] || continue

@@ -4,8 +4,8 @@
 #   apply-config.sh --rollback [--from DIR] [--apply] undo the newest (or given) apply
 #
 # Dry-run is the default: nothing is written without --apply. With --apply, each original
-# is first copied to  ~/.local/share/cli-proxy-backups/<timestamp>/  (override the root with
-# CLI_PROXY_BACKUP_ROOT) and the file is then edited IN PLACE (same inode). In-place matters:
+# is first copied to  ~/.local/share/proxd/backups/<timestamp>/  (override the root with
+# PROXD_BACKUP_ROOT, or the pre-rename CLI_PROXY_BACKUP_ROOT) and the file is then edited IN PLACE (same inode). In-place matters:
 # the containers bind-mount config.yaml as a single file, and a rename-style replace would
 # leave the running proxy reading the old inode.
 #
@@ -19,8 +19,9 @@
 #
 # This script never restarts a container and never prints config values other than these
 # keys (diff output is redacted as a second guard). Default targets:
-#   ~/.local/share/cli-proxy-api/config.yaml     (Codex instance)
-#   ~/.local/share/cli-proxy-claude/config.yaml  (Claude instance)
+#   ~/.local/share/proxd/codex/config.yaml   (Codex instance)
+#   ~/.local/share/proxd/claude/config.yaml  (Claude instance)
+#   ~/.local/share/proxd/gemini/config.yaml  (Gemini instance)
 set -euo pipefail
 
 APPLY=0
@@ -34,16 +35,17 @@ while [ $# -gt 0 ]; do
     --rollback) ROLLBACK=1 ;;
     --from) FROM=${2:?--from needs a directory}; shift ;;
     --config) CONFIGS+=("${2:?--config needs a path}"); shift ;;
-    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
 done
 if [ "${#CONFIGS[@]}" -eq 0 ]; then
-  CONFIGS=("$HOME/.local/share/cli-proxy-api/config.yaml" "$HOME/.local/share/cli-proxy-claude/config.yaml")
+  CONFIGS=("$HOME/.local/share/proxd/codex/config.yaml" "$HOME/.local/share/proxd/claude/config.yaml"
+           "$HOME/.local/share/proxd/gemini/config.yaml")
 fi
 
-ROOT=${CLI_PROXY_BACKUP_ROOT:-$HOME/.local/share/cli-proxy-backups}
+ROOT=${PROXD_BACKUP_ROOT:-${CLI_PROXY_BACKUP_ROOT:-$HOME/.local/share/proxd/backups}}
 TS=$(date -u +%Y%m%dT%H%M%SZ)
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -205,7 +207,7 @@ echo
 echo "Backup: $BACKUP"
 echo "The proxy hot-reloads config.yaml (about a second): no restart is needed for these keys."
 echo "Check the reload:  podman logs --since 2m proxd-claude 2>&1 | grep 'config file changed'"
-echo "Check persistence: ls ~/.local/share/cli-proxy-claude/auth/*.cds   (one per cooled credential)"
+echo "Check persistence: ls ~/.local/share/proxd/claude/auth/*.cds   (one per cooled credential)"
 echo "If you want a restart anyway (not done by this script; wait until the .cds files exist):"
-echo "  systemctl --user restart proxd-codex.service proxd-claude.service"
+echo "  systemctl --user restart proxd-codex.service proxd-claude.service proxd-gemini.service"
 echo "Undo: $(cd "$(dirname "$0")" && pwd)/$(basename "$0") --rollback --from $BACKUP --apply"
