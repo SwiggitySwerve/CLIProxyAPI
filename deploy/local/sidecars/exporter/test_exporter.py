@@ -554,8 +554,9 @@ class ExporterLabelGate(unittest.TestCase):
     def check(self, old, prox):
         m=self.mod.Metrics()
         for row in old:
-            m.add('proxd_requests_total','counter','Requests',1,status='success',**row)
-            m.add('proxd_tokens_total','counter','Tokens',1,type='input',**row)
+            # The gate's baseline is the pre-rename exporter's output, so it carries cliproxy_* names.
+            m.add('cliproxy_requests_total','counter','Requests',1,status='success',**row)
+            m.add('cliproxy_tokens_total','counter','Tokens',1,type='input',**row)
         metrics=self.root/'old.prom';metrics.write_text(m.text())
         payload=usage_payload();payload['groups']=[]
         for labels in prox:

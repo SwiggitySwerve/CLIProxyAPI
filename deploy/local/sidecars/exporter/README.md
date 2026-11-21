@@ -1,9 +1,10 @@
 # Prox usage counter cutover (Step E only)
 
 > **Rename to ProxD.** `proxd-exporter` publishes every metric as `proxd_*` only. Before
-> the rename the names were `proxd_*`; during the switch both prefixes were published,
+> the rename the names were `cliproxy_*`; during the switch both prefixes were published,
 > and the dashboard and alerts now use `proxd_*`. Series recorded before the switch stay
-> under `proxd_*` in Prometheus until retention removes them. Inputs: `~/.config/proxd/{instances.json,exporter.json,management-key,plans.json}`
+> under `cliproxy_*` in Prometheus until retention removes them. `check-usage-labels.py`
+> (the Step E gate) still reads a pre-rename baseline, so it matches `cliproxy_*` samples. Inputs: `~/.config/proxd/{instances.json,exporter.json,management-key,plans.json}`
 > and `~/.local/share/proxd/rerank/state.json`, overridable with `PROXD_INSTANCES`,
 > `PROXD_EXPORTER_CONFIG`, `PROXD_EXPORTER_LISTEN`, `PROXD_MANAGEMENT_KEY_FILE`, `PROXD_PLANS`
 > and `PROXD_RERANK_STATE` (each falls back to its `CLI_PROXY_*` name).
@@ -77,7 +78,7 @@ swap and label-set gate are unaffected.
    counter down (a Prometheus reset). Bump `USAGE_SOURCE`, for example to
    `prox-usage-2`, **before** applying any later decrease.
 5. Land and run the proposed `swap-series.test.yaml` case in
-   `swervebox/kubernetes/apps/cli-proxy-api/tests/exporter-rules.test.yaml`, against
+   `swervebox/kubernetes/apps/proxd/tests/exporter-rules.test.yaml`, against
    its extracted `rules.yaml`. It ends the old series, starts the source-labelled
    series at large lifetime totals and requires both E0 alerts plus
    `CliProxyHighFailureRate` to stay inactive. The coordinator owns that repo;
