@@ -1,4 +1,4 @@
-"""Black-box test of cli-proxy-exporter's proxy-state metrics against a stub management API.
+"""Black-box test of proxd-exporter's proxy-state metrics against a stub management API.
 
 Run: python3 -m unittest deploy/local/sidecars/exporter/test_exporter.py
 """
@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 
-SCRIPT = Path(__file__).with_name("cli-proxy-exporter")
+SCRIPT = Path(__file__).with_name("proxd-exporter")
 FAR_FUTURE = "2099-01-01T00:00:00.123456789+08:00"  # nanoseconds and a non-UTC offset, as the proxy sends
 CREDS = [
     {"auth_index": "idle", "provider": "claude", "email": "idle@example.test", "status": "active",
@@ -77,8 +77,8 @@ class ExporterProxyTruth(unittest.TestCase):
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         with tempfile.TemporaryDirectory(dir="/dev/shm") as tmp:
             tmp = Path(tmp)
-            (tmp / ".config/cli-proxy-rerank").mkdir(parents=True)
-            (tmp / ".config/cli-proxy-rerank/management-key").write_text("test-key\n")
+            (tmp / ".config/proxd").mkdir(parents=True)
+            (tmp / ".config/proxd/management-key").write_text("test-key\n")
             instances = tmp / "instances.json"
             instances.write_text(json.dumps({"instances": [{
                 "id": "stub", "provider": "claude", "base_url": f"http://127.0.0.1:{srv.server_port}",
@@ -119,12 +119,12 @@ def load_exporter(home: Path):
     """Import the script as a module against a throwaway HOME (it reads paths at import)."""
     import importlib.machinery
     import importlib.util
-    (home / ".config/cli-proxy-rerank").mkdir(parents=True, exist_ok=True)
-    (home / ".config/cli-proxy-rerank/management-key").write_text("test-key\n")
+    (home / ".config/proxd").mkdir(parents=True, exist_ok=True)
+    (home / ".config/proxd/management-key").write_text("test-key\n")
     instances = home / "instances.json"
     instances.write_text(json.dumps({"instances": []}))
-    old = {k: os.environ.get(k) for k in ("HOME", "CLI_PROXY_INSTANCES")}
-    os.environ.update(HOME=str(home), CLI_PROXY_INSTANCES=str(instances))
+    old = {k: os.environ.get(k) for k in ("HOME", "PROXD_INSTANCES")}
+    os.environ.update(HOME=str(home), PROXD_INSTANCES=str(instances))
     sys.dont_write_bytecode = True  # the loader would leave a .pyc beside the script
     try:
         loader = importlib.machinery.SourceFileLoader(f"exporter_{id(home)}", str(SCRIPT))
@@ -304,6 +304,28 @@ class ExporterUsageCounters(unittest.TestCase):
         finally:
             server.shutdown(); server.server_close(); thread.join()
         self.assertEqual(requests, [('/v1/exporter', 'Bearer test-key')])
+
+    def test_every_cliproxy_family_is_also_published_as_proxd_with_identical_series(self):
+        m = self.mod.Metrics()
+        with patch.object(self.mod, "http_ok", return_value=(True, json.dumps(usage_payload()).encode())):
+            self.mod.collect_usage_health(m)
+            self.mod.collect_usage(m)
+        lines = m.text().splitlines()
+        by_prefix, order = {"cliproxy_": [], "proxd_": []}, []
+        for line in lines:
+            name = line.split(" ", 3)[2] if line.startswith("# ") else line
+            prefix = next(p for p in by_prefix if name.startswith(p))  # nothing else is published
+            by_prefix[prefix].append(line.replace(prefix, "", 1))
+            order.append(prefix)
+        # Same HELP, TYPE, series, labels and values (NaN included), in the same order.
+        self.assertEqual(by_prefix["proxd_"], by_prefix["cliproxy_"])
+        self.assertIn('# TYPE proxd_requests_total counter', lines)
+        self.assertIn('proxd_usage_source_last_event_age_seconds{instance="codex-primary"} NaN', lines)
+        # All proxd_ lines follow all cliproxy_ lines, so neither block splits the other's families.
+        half = len(lines) // 2
+        self.assertEqual(order, ["cliproxy_"] * half + ["proxd_"] * half)
+        # The legacy series themselves are unchanged by the mirror.
+        self.assertEqual(sum(1 for l in lines if l.startswith("cliproxy_")), len(m.series))
 
 
 def health_payload():

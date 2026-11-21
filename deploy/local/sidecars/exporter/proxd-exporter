@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
-"""Prometheus exporter for the CLIProxyAPI subscription proxy.
+"""Prometheus exporter for the ProxD subscription proxy.
 
 Everything is computed at scrape time from local sources, read-only:
   - prox-usage GET /v1/exporter: canonical lifetime usage at the same current rates
     as Prox analytics, with source="prox-usage-2" (bumped from "prox-usage" for a price decrease) and the existing label values.
   - prox-usage source subscription and event age: additive health without a source label.
-  - CLIProxyAPI management API (GET /credentials on each instance): the proxy's own
+  - ProxD management API (GET /credentials on each instance): the proxy's own
     state per credential (available / cooling / unavailable / disabled, next_retry_after,
     per-model cooldowns, quota signals and their age), labelled by instance and auth_index.
     This is the source of truth for availability.
-  - cli-proxy-rerank state (~/.local/share/cli-proxy-rerank/state.json): ADVISORY weekly
+  - proxd-rerank state (~/.local/share/proxd/rerank/state.json): ADVISORY weekly
     quota used %, reset time, limited flag and soonest-reset rank per account, with its age.
   - Liveness of the proxy instances (/healthz); the usage service's liveness is its own health series.
 
 Serves /metrics on 127.0.0.1 and the cluster bridge address so the in-cluster
 Prometheus can scrape it. Labels hold account emails; this endpoint is only
 reachable from the host and the cluster.
+
+Every series is published twice, as cliproxy_* and as proxd_* with identical labels and
+values (see Metrics.text), while dashboards and alerts move to the proxd_* names.
 """
 import json
 import math
@@ -30,20 +33,27 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 HOME = Path.home()
-STATE = HOME / ".local/share/cli-proxy-rerank/state.json"
-PLANS = HOME / ".config/cli-proxy-rerank/plans.json"
-MGMT_KEY = (HOME / ".config/cli-proxy-rerank/management-key").read_text().strip()
+
+
+def env(name):
+    """PROXD_<name>, else the pre-rename CLI_PROXY_<name>; None when neither is set."""
+    return os.environ.get(f"PROXD_{name}") or os.environ.get(f"CLI_PROXY_{name}")
+
+
+STATE = Path(env("RERANK_STATE") or HOME / ".local/share/proxd/rerank/state.json")
+PLANS = Path(env("PLANS") or HOME / ".config/proxd/plans.json")
+MGMT_KEY = Path(env("MANAGEMENT_KEY_FILE") or HOME / ".config/proxd/management-key").read_text().strip()
 # Proxy instances come from the shared instance map (deploy/local/instances.example.json);
 # the built-in values apply when the file is missing.
-INSTANCES_FILE = Path(os.environ.get("CLI_PROXY_INSTANCES") or HOME / ".config/cli-proxy/instances.json")
+INSTANCES_FILE = Path(env("INSTANCES") or HOME / ".config/proxd/instances.json")
 BUILTIN_INSTANCES = [
     {"id": "claude-primary", "provider": "claude", "base_url": "http://127.0.0.1:8319", "management_path": "/v8/management"},
     {"id": "codex-primary", "provider": "codex", "base_url": "http://127.0.0.1:8317", "management_path": "/v8/management"},
 ]
-# Listen addresses are host-specific and stay out of the repo: ~/.config/cli-proxy/exporter.json
-# {"listen": [["127.0.0.1", 9787], ["<bridge-address>", 9787]]}. CLI_PROXY_EXPORTER_LISTEN
+# Listen addresses are host-specific and stay out of the repo: ~/.config/proxd/exporter.json
+# {"listen": [["127.0.0.1", 9787], ["<bridge-address>", 9787]]}. PROXD_EXPORTER_LISTEN
 # ("host:port,host:port") overrides the file; loopback only when neither is set.
-EXPORTER_FILE = Path(os.environ.get("CLI_PROXY_EXPORTER_CONFIG") or HOME / ".config/cli-proxy/exporter.json")
+EXPORTER_FILE = Path(env("EXPORTER_CONFIG") or HOME / ".config/proxd/exporter.json")
 USAGE = "http://127.0.0.1:18320"
 USAGE_SOURCE = "prox-usage-2"  # Bumped 2026-11-16 for the Sonnet 5.5 cache-read decrease; bump again on any later counter-decreasing price change.
 USAGE_DEADLINE_SECONDS = 4
@@ -67,7 +77,7 @@ def load_proxies():
 
 
 def load_listen():
-    spec = os.environ.get("CLI_PROXY_EXPORTER_LISTEN")
+    spec = env("EXPORTER_LISTEN")
     if spec:
         return [(h, int(p)) for h, _, p in (s.strip().rpartition(":") for s in spec.split(","))]
     try:
@@ -78,6 +88,9 @@ def load_listen():
 
 PROXIES = load_proxies()
 LISTEN = load_listen()
+
+
+LEGACY_NAME = re.compile(r"^(# (?:HELP|TYPE) )?cliproxy_")
 
 
 def esc(value) -> str:
@@ -108,7 +121,11 @@ class Metrics:
 
     def text(self):
         # Full precision: counters reach 1e9+ tokens, and 6 significant digits hid small increments.
-        return "\n".join(l if isinstance(l, str) else f"{l[0]} {'NaN' if math.isnan(l[1]) else format(l[1], '.17g')}" for l in self.lines) + "\n"
+        out = [l if isinstance(l, str) else f"{l[0]} {'NaN' if math.isnan(l[1]) else format(l[1], '.17g')}" for l in self.lines]
+        # Rename (D3): every cliproxy_* family is published again as proxd_* with the same labels and
+        # values, until dashboards and alerts use proxd_* and cliproxy_* history is past retention.
+        out += [LEGACY_NAME.sub(r"\1proxd_", l) for l in out if LEGACY_NAME.match(l)]
+        return "\n".join(out) + "\n"
 
 
 def http_ok(url, headers=None, timeout=5):
@@ -263,11 +280,11 @@ def collect_usage(m: Metrics):
 
 
 def collect_quota(m: Metrics):
-    # Advisory only: cli-proxy-rerank's own usage-endpoint reads. The proxy's state is in the
+    # Advisory only: proxd-rerank's own usage-endpoint reads. The proxy's state is in the
     # cliproxy_credential_* metrics (collect_credentials); trust those for availability.
     state = json.loads(STATE.read_text())
-    m.add("cliproxy_rerank_last_run_timestamp_seconds", "gauge", "Last successful cli-proxy-rerank run.", state["updated_at"])
-    m.add("cliproxy_rerank_state_age_seconds", "gauge", "Seconds since the last cli-proxy-rerank run (advisory data age).",
+    m.add("cliproxy_rerank_last_run_timestamp_seconds", "gauge", "Last successful proxd-rerank run.", state["updated_at"])
+    m.add("cliproxy_rerank_state_age_seconds", "gauge", "Seconds since the last proxd-rerank run (advisory data age).",
           max(m.now - state["updated_at"], 0))
     try:
         creds = fetch_credentials(m)
