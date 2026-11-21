@@ -1,11 +1,10 @@
 # Prox usage counter cutover (Step E only)
 
-> **Rename to ProxD (decision D3).** `proxd-exporter` publishes every series twice: under
-> its `cliproxy_*` name and again as `proxd_*`, with identical HELP, TYPE, labels and
-> values. The `proxd_*` block follows the whole `cliproxy_*` block in each scrape. Move
-> dashboards and alerts to `proxd_*`, then drop `cliproxy_*` once its history is past the
-> Prometheus retention window. The `cliproxy_*` names below describe the legacy half; each
-> has a `proxd_*` twin. Inputs: `~/.config/proxd/{instances.json,exporter.json,management-key,plans.json}`
+> **Rename to ProxD.** `proxd-exporter` publishes every metric as `proxd_*` only. Before
+> the rename the names were `cliproxy_*`; during the switch both prefixes were published,
+> and the dashboard and alerts now use `proxd_*`. Series recorded before the switch stay
+> under `cliproxy_*` in Prometheus until retention removes them. `check-usage-labels.py`
+> (the Step E gate) still reads a pre-rename baseline, so it matches `cliproxy_*` samples. Inputs: `~/.config/proxd/{instances.json,exporter.json,management-key,plans.json}`
 > and `~/.local/share/proxd/rerank/state.json`, overridable with `PROXD_INSTANCES`,
 > `PROXD_EXPORTER_CONFIG`, `PROXD_EXPORTER_LISTEN`, `PROXD_MANAGEMENT_KEY_FILE`, `PROXD_PLANS`
 > and `PROXD_RERANK_STATE` (each falls back to its `CLI_PROXY_*` name).
@@ -15,16 +14,16 @@ the later swap: one authenticated `GET http://127.0.0.1:18320/v1/exporter` suppl
 canonical lifetime usage, using the same P4 pricing as Prox analytics. The shim
 opens no usage database and loads no prices or client aliases. Credential, quota,
 and plan sources and labels are unchanged. The CPAMP dashboard probe is gone:
-`cliproxy_up{service="dashboard"}` is no longer emitted (the exporter no longer calls
+`proxd_up{service="dashboard"}` is no longer emitted (the exporter no longer calls
 `:18317`; the service unit no longer orders after `cpa-manager-plus.service`).
-`cliproxy_up{service="proxy"}` and `{service="usage"}` remain. Delete
+`proxd_up{service="proxy"}` and `{service="usage"}` remain. Delete
 `CliProxyDashboardDown` and its panel in the same rollout (swervebox).
 
 All 40 existing metric names and types remain. Every usage counter/gauge gains
 `source="prox-usage-2"` (was `prox-usage` until the 2026-11-16 Sonnet 5.5 price decrease), including newest-request time and priced-model count. The
 other label keys and visible requested-model/account/provider/client values stay
 as before. Health series retain their additive identities, including
-`cliproxy_up{service="usage"}` and the two `cliproxy_usage_source_*{instance}`
+`proxd_up{service="usage"}` and the two `proxd_usage_source_*{instance}`
 gauges. Health and counters share the additive four-second absolute HTTP deadline
 and at most one outstanding daemon request. The key stays only in the bearer
 header; it is never put in a URL or logs.
@@ -79,7 +78,7 @@ swap and label-set gate are unaffected.
    counter down (a Prometheus reset). Bump `USAGE_SOURCE`, for example to
    `prox-usage-2`, **before** applying any later decrease.
 5. Land and run the proposed `swap-series.test.yaml` case in
-   `swervebox/kubernetes/apps/cli-proxy-api/tests/exporter-rules.test.yaml`, against
+   `swervebox/kubernetes/apps/proxd/tests/exporter-rules.test.yaml`, against
    its extracted `rules.yaml`. It ends the old series, starts the source-labelled
    series at large lifetime totals and requires both E0 alerts plus
    `CliProxyHighFailureRate` to stay inactive. The coordinator owns that repo;
@@ -107,20 +106,20 @@ a different model candidate. Cost HELP changes from "synced in the dashboard" to
 
 Nothing syncs prices any more, so a model missing from the rate book has no cost
 series and would go unnoticed. Two gauges make it visible:
-`cliproxy_usage_unpriced_models{source="prox-usage-2"}` is the number of distinct
+`proxd_usage_unpriced_models{source="prox-usage-2"}` is the number of distinct
 (provider, model) pairs that have requests and no price in the snapshot (0 when
-all are priced), and `cliproxy_usage_unpriced_model_info{provider,model,source}`
+all are priced), and `proxd_usage_unpriced_model_info{provider,model,source}`
 is 1 for each such pair, for an alert's labels.
 
 The health block also carries the usage service's job outcomes when the snapshot
-has them: `cliproxy_usage_job_last_success_timestamp_seconds{kind}` and
-`cliproxy_usage_job_last_failure_timestamp_seconds{kind}` (a kind that has never
+has them: `proxd_usage_job_last_success_timestamp_seconds{kind}` and
+`proxd_usage_job_last_failure_timestamp_seconds{kind}` (a kind that has never
 succeeded or failed has no series, so pair an alert with `absent()`), and
-`cliproxy_usage_job_outcome_error` (0 or 1). These have no `source` label, like
+`proxd_usage_job_outcome_error` (0 or 1). These have no `source` label, like
 the other health series. A snapshot without the job keys adds no job series.
 The job block is validated on its own, after source health is published: a
 present but malformed job value publishes no job times and sets
-`cliproxy_usage_job_outcome_error` to 1, and never hides source subscription
+`proxd_usage_job_outcome_error` to 1, and never hides source subscription
 or event age. A malformed source entry still rejects the health block.
 
 **Rollback caveat:** reverting to the old exporter resumes its old counter
