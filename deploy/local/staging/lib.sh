@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 # Shared names, guards and helpers for the staging stack. Sourced, not executed.
-# Every podman call below is scoped to the cli-proxy-staging* names and ports.
+# Every podman call below is scoped to the proxd-staging* names and ports.
 #
 # STAGING_NAME (optional, [a-z0-9]+, not "mock"/"pod") makes a separate stack so
 # several can run at once. Unset keeps the original names. Give each stack its own
 # STAGING_PROXY_PORT and STAGING_MOCK_PORT; the data dir defaults to match the name:
-#   STAGING_NAME  pod                        containers                                 data dir
-#   (unset)       cli-proxy-staging-pod      cli-proxy-staging, cli-proxy-staging-mock  .../cli-proxy-staging
-#   f7a           cli-proxy-staging-f7a-pod  cli-proxy-staging-f7a, ...-f7a-mock        .../cli-proxy-staging-f7a
+#   STAGING_NAME  pod                    containers                         data dir
+#   (unset)       proxd-staging-pod      proxd-staging, proxd-staging-mock  .../proxd-staging
+#   f7a           proxd-staging-f7a-pod  proxd-staging-f7a, ...-f7a-mock    .../proxd-staging-f7a
 set -euo pipefail
 
 STAGING_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$STAGING_DIR/../../.." && pwd)
 NAME=${STAGING_NAME:-}
 case "$NAME" in
-  "") BASE=cli-proxy-staging ;;
+  "") BASE=proxd-staging ;;
   mock|pod) echo "error: STAGING_NAME must not be '$NAME' (collides with the default names)" >&2; exit 1 ;;
   *[!a-z0-9]*) echo "error: STAGING_NAME must match [a-z0-9]+, got '$NAME'" >&2; exit 1 ;;
-  *) BASE=cli-proxy-staging-$NAME ;;
+  *) BASE=proxd-staging-$NAME ;;
 esac
 DATA_DIR=${STAGING_DATA_DIR:-$HOME/.local/share/$BASE}
 POD=$BASE-pod
@@ -25,7 +25,7 @@ PROXY_CT=$BASE
 MOCK_CT=$BASE-mock
 PROXY_PORT=${STAGING_PROXY_PORT:-18329}
 MOCK_PORT=${STAGING_MOCK_PORT:-18330}
-IMAGE_REPO=localhost/cli-proxy-api
+IMAGE_REPO=localhost/proxd
 MOCK_IMAGE=docker.io/library/python:3.12-slim
 CRED_A=sk-staging-fake-claude-a
 CRED_B=sk-staging-fake-claude-b
@@ -37,7 +37,7 @@ podman() { command podman "$@" 9>&-; }
 
 # Refuse anything that is not a staging name, port or data dir.
 guard_name() {
-  case "$1" in cli-proxy-staging*) ;; *) die "refusing to touch non-staging container/pod '$1'" ;; esac
+  case "$1" in proxd-staging*) ;; *) die "refusing to touch non-staging container/pod '$1'" ;; esac
 }
 guard_ports() {
   local p
@@ -49,7 +49,7 @@ guard_ports() {
   [ "$PROXY_PORT" != "$MOCK_PORT" ] || die "proxy and mock ports must differ"
 }
 guard_data_dir() {
-  case "$(basename "$DATA_DIR")" in cli-proxy-staging*) ;; *) die "STAGING_DATA_DIR must be named cli-proxy-staging*" ;; esac
+  case "$(basename "$DATA_DIR")" in proxd-staging*) ;; *) die "STAGING_DATA_DIR must be named proxd-staging*" ;; esac
 }
 guard_ports
 guard_data_dir
@@ -72,7 +72,7 @@ guard_port_free_or_ours() {
 OWNER="$DATA_DIR:$PROXY_PORT:$MOCK_PORT"
 guard_pod_owner() {
   local have
-  have=$(podman pod inspect --format '{{index .Labels "cli-proxy-staging.owner"}}' "$POD" 2>/dev/null || true)
+  have=$(podman pod inspect --format '{{index .Labels "proxd-staging.owner"}}' "$POD" 2>/dev/null || true)
   [ -z "$have" ] || [ "$have" = "$OWNER" ] ||
     die "pod $POD is already in use by another stack ($have); set a distinct STAGING_NAME (and ports/data dir) or run down.sh for that stack"
 }
@@ -81,7 +81,7 @@ ensure_pod() {
   if pod_exists "$POD"; then guard_pod_owner; return; fi
   guard_port_free_or_ours "$PROXY_PORT"
   guard_port_free_or_ours "$MOCK_PORT"
-  podman pod create --name "$POD" --label "cli-proxy-staging.owner=$OWNER" \
+  podman pod create --name "$POD" --label "proxd-staging.owner=$OWNER" \
     -p "127.0.0.1:$PROXY_PORT:8317" -p "127.0.0.1:$MOCK_PORT:$MOCK_PORT" >/dev/null
 }
 

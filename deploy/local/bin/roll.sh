@@ -8,7 +8,7 @@
 # Live targets need --approved. They record the running image to a rollback file,
 # rewrite the unit's Image= line, daemon-reload, restart that one unit, smoke-check
 # /healthz and print the exact rollback command. --dry-run prints what would change
-# and touches nothing. <image-tag> is a full image ref, or a tag of localhost/cli-proxy-api.
+# and touches nothing. <image-tag> is a full image ref, or a tag of localhost/proxd.
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/../staging/lib.sh"
 
