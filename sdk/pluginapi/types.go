@@ -2036,10 +2036,13 @@ func (g *QuotaGroup) UnmarshalJSON(data []byte) error {
 
 // QuotaBucket describes a single quota window or limit bucket.
 type QuotaBucket struct {
+	ID                string  `json:"id,omitempty"`
 	Window            string  `json:"window,omitempty"`
 	RemainingFraction float64 `json:"remainingFraction"`
 	ResetTime         string  `json:"resetTime,omitempty"`
 	Description       string  `json:"description,omitempty"`
+	PeriodSeconds     *int64  `json:"periodSeconds,omitempty"`
+	Scope             string  `json:"scope,omitempty"`
 }
 
 // UnmarshalJSON supports both camelCase and snake_case field names.
@@ -2047,14 +2050,24 @@ func (b *QuotaBucket) UnmarshalJSON(data []byte) error {
 	type Alias QuotaBucket
 	aux := struct {
 		*Alias
+		AltBucketID          string   `json:"bucket_id"`
+		AltBucketIDCamel     string   `json:"bucketId"`
 		RemainingFraction    *float64 `json:"remainingFraction"`
 		AltRemainingFraction *float64 `json:"remaining_fraction"`
 		AltResetTime         string   `json:"reset_time"`
+		AltPeriodSeconds     *int64   `json:"period_seconds"`
 	}{
 		Alias: (*Alias)(b),
 	}
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
+	}
+	if b.ID == "" {
+		if aux.AltBucketID != "" {
+			b.ID = aux.AltBucketID
+		} else if aux.AltBucketIDCamel != "" {
+			b.ID = aux.AltBucketIDCamel
+		}
 	}
 	if aux.RemainingFraction != nil {
 		b.RemainingFraction = *aux.RemainingFraction
@@ -2063,6 +2076,9 @@ func (b *QuotaBucket) UnmarshalJSON(data []byte) error {
 	}
 	if b.ResetTime == "" && aux.AltResetTime != "" {
 		b.ResetTime = aux.AltResetTime
+	}
+	if b.PeriodSeconds == nil && aux.AltPeriodSeconds != nil {
+		b.PeriodSeconds = aux.AltPeriodSeconds
 	}
 	return nil
 }

@@ -63,6 +63,10 @@ type Config struct {
 	// AuthDir is the directory where authentication token files are stored.
 	AuthDir string `yaml:"auth-dir" json:"-"`
 
+	// AcceptedProviders optionally restricts which credential providers this instance accepts for
+	// new OAuth logins, imports, and uploads. Empty means all providers are accepted.
+	AcceptedProviders []string `yaml:"accepted-providers" json:"accepted-providers,omitempty"`
+
 	// Debug enables or disables debug-level logging and other debug features.
 	Debug bool `yaml:"debug" json:"debug"`
 

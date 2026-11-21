@@ -57,6 +57,67 @@ func (h *Handler) GetQuotaProviders(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"providers": host.QuotaProviders(c.Request.Context())})
 }
 
+// FetchCredentialQuotaV8 retrieves normalized quota for a credential via its host-resolved
+// quota plugin only. Caller-supplied plugin_id overrides that do not match the host-resolved
+// plugin are rejected, and declarative quota_probe metadata is excluded from v8 collection.
+func (h *Handler) FetchCredentialQuotaV8(c *gin.Context) {
+	var body credentialQuotaRequest
+	if errBind := c.ShouldBindJSON(&body); errBind != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	authIndex := body.resolveAuthIndex()
+	if authIndex == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "auth_index is required"})
+		return
+	}
+
+	auth := h.authByIndex(authIndex)
+	if auth == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth not found"})
+		return
+	}
+
+	h.mu.Lock()
+	host := h.pluginHost
+	h.mu.Unlock()
+	if host == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "no quota provider available for credential"})
+		return
+	}
+
+	provider := strings.TrimSpace(auth.Provider)
+	resolvedPluginIDs := host.QuotaProviderPluginIDs(c.Request.Context())
+	resolvedPluginID := strings.TrimSpace(resolvedPluginIDs[strings.ToLower(provider)])
+	if resolvedPluginID == "" {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "no quota provider available for credential"})
+		return
+	}
+	if requestedPlugin := strings.TrimSpace(body.PluginID); requestedPlugin != "" && !strings.EqualFold(requestedPlugin, resolvedPluginID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "quota plugin does not match credential provider"})
+		return
+	}
+
+	req := pluginapi.QuotaFetchRequest{
+		AuthIndex:  auth.Index,
+		AuthID:     auth.ID,
+		Provider:   provider,
+		Metadata:   auth.Metadata,
+		Attributes: auth.Attributes,
+	}
+	quotaResp, handled, errFetch := host.FetchQuotaByPlugin(c.Request.Context(), resolvedPluginID, req)
+	if !handled {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "no quota provider available for credential"})
+		return
+	}
+	if errFetch != nil {
+		log.WithError(errFetch).Warnf("failed to fetch v8 quota for credential %s", auth.Index)
+		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to fetch quota: %v", errFetch)})
+		return
+	}
+	c.JSON(http.StatusOK, quotaResp)
+}
+
 // FetchCredentialQuota retrieves normalized quota for a credential via its quota provider or declarative probe.
 func (h *Handler) FetchCredentialQuota(c *gin.Context) {
 	var body credentialQuotaRequest

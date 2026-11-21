@@ -814,6 +814,7 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 		entry["request_retry"] = requestRetry
 	}
 	if quota.v8 {
+		entry["lifecycle"] = credentialLifecycle(auth)
 		// Which proxy instance owns this credential; omitted when CLIPROXY_INSTANCE_ID is unset.
 		if instanceID := redisqueue.DeploymentInstanceID(); instanceID != "" {
 			entry["instance_id"] = instanceID
