@@ -1,4 +1,4 @@
-"""Tests for cli-proxy-recovery-check: what a record keeps and what it must never keep.
+"""Tests for proxd-recovery-check: what a record keeps and what it must never keep.
 
 Run: python3 -I deploy/local/sidecars/recovery-check/test_recovery_check.py
 """
@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-loader = importlib.machinery.SourceFileLoader("recovery_check", str(HERE / "cli-proxy-recovery-check"))
+loader = importlib.machinery.SourceFileLoader("recovery_check", str(HERE / "proxd-recovery-check"))
 spec = importlib.util.spec_from_loader("recovery_check", loader)
 rc = importlib.util.module_from_spec(spec)
 loader.exec_module(rc)

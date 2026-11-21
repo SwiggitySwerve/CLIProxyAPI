@@ -1,8 +1,8 @@
 [Unit]
-Description=Record masked CLIProxyAPI quota signals and cooldown deadlines
+Description=Record masked ProxD quota signals and cooldown deadlines
 
 [Service]
 Type=oneshot
-ExecStart=%h/bin/cli-proxy-recovery-check
+ExecStart=%h/bin/proxd-recovery-check
 TimeoutStartSec=90
 Nice=10

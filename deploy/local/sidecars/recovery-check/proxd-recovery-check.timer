@@ -1,5 +1,5 @@
 [Unit]
-Description=Record CLIProxyAPI quota signals every 5 minutes
+Description=Record ProxD quota signals every 5 minutes
 
 [Timer]
 OnBootSec=3min

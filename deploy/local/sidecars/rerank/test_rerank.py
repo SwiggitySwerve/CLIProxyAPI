@@ -1,4 +1,4 @@
-"""Black-box test of cli-proxy-rerank against a stub management API.
+"""Black-box test of proxd-rerank against a stub management API.
 
 Run: python3 -m unittest deploy/local/sidecars/rerank/test_rerank.py
 """
@@ -11,7 +11,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-SCRIPT = Path(__file__).with_name("cli-proxy-rerank")
+SCRIPT = Path(__file__).with_name("proxd-rerank")
 CREDS = [
     {"name": "a.json", "email": "a@example.test", "provider": "claude", "auth_index": "ia", "priority": 100},
     {"name": "b.json", "email": "b@example.test", "provider": "claude", "auth_index": "ib", "priority": 100},
@@ -52,14 +52,15 @@ class Stub(BaseHTTPRequestHandler):
 
 
 class RerankReadOnly(unittest.TestCase):
-    def test_failed_probe_is_unknown_and_nothing_is_patched(self):
+    def run_rerank(self, prefix):
+        """One run against the stub, with the paths given in <prefix>* variables; returns state accounts."""
         Stub.seen.clear()
         srv = HTTPServer(("127.0.0.1", 0), Stub)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
-            (tmp / ".config/cli-proxy-rerank").mkdir(parents=True)
-            (tmp / ".config/cli-proxy-rerank/management-key").write_text("test-key\n")
+            key = tmp / "key"
+            key.write_text("test-key\n")
             instances = tmp / "instances.json"
             instances.write_text(json.dumps({"instances": [{
                 "id": "stub", "provider": "claude", "base_url": f"http://127.0.0.1:{srv.server_port}",
@@ -70,12 +71,21 @@ class RerankReadOnly(unittest.TestCase):
             state.write_text(json.dumps({"updated_at": 1000.0, "accounts": [
                 {"provider": "claude", "account": "a@example.test", "rank": 1, "priority": 100, "limited": False,
                  "used_percent": 40, "reset_at": 5000.0}]}))
-            env = dict(os.environ, HOME=str(tmp), CLI_PROXY_INSTANCES=str(instances),
-                       CLI_PROXY_RERANK_STATE=str(state), CLI_PROXY_CLAUDE_CONFIG=str(config))
+            env = {k: v for k, v in os.environ.items() if not k.startswith(("PROXD_", "CLI_PROXY_"))}
+            env.update({"HOME": str(tmp), f"{prefix}INSTANCES": str(instances), f"{prefix}MANAGEMENT_KEY_FILE": str(key),
+                        f"{prefix}RERANK_STATE": str(state), f"{prefix}CLAUDE_CONFIG": str(config)})
             subprocess.run([str(SCRIPT)], env=env, check=True, capture_output=True)
             accounts = {a["account"]: a for a in json.loads(state.read_text())["accounts"]}
         srv.shutdown()
+        return accounts
 
+    def test_pre_rename_env_names_still_apply(self):
+        accounts = self.run_rerank("CLI_PROXY_")
+        self.assertEqual({ua for m, _, ua in Stub.seen if m == "POST"}, {"claude-cli/9.9.9 (test)"})
+        self.assertEqual(len(accounts), 3)
+
+    def test_failed_probe_is_unknown_and_nothing_is_patched(self):
+        accounts = self.run_rerank("PROXD_")
         self.assertEqual({m for m, _, _ in Stub.seen}, {"GET", "POST"})  # no PATCH, ever
         self.assertEqual({ua for m, _, ua in Stub.seen if m == "POST"}, {"claude-cli/9.9.9 (test)"})
         a, b, c = (accounts[f"{x}@example.test"] for x in "abc")

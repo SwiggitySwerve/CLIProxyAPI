@@ -1,20 +1,30 @@
 #!/usr/bin/env python3
 """Keep the Claude hub's cloaked Claude Code fingerprint on the current release.
 
-The hub (cli-proxy-claude) sends its configured Claude Code fingerprint upstream for clients it
+The hub (proxd-claude) sends its configured Claude Code fingerprint upstream for clients it
 can't verify, including T3 Code (entrypoint "t3-code"). Anthropic gates new models on that
 version ("Claude Code 2.1.280 does not support this model"), so a stale baseline blocks new
 models. This updates claude, measures the headers the real binary sends, and moves the hub's
 upstream.claude.header-defaults forward. It never downgrades and only edits its marked block.
+
+The block is marked "proxd-claude-ua-sync". A block with the pre-rename "cli-proxy-claude-ua-sync"
+markers is read the same way and replaced where it stands at the next update. A config that is
+already up to date is not rewritten just to rename the markers.
+
+The config is ~/.local/share/proxd/claude/config.yaml; PROXD_CLAUDE_CONFIG (or the pre-rename
+CLI_PROXY_CLAUDE_CONFIG) overrides it.
 """
 import http.server, json, os, re, subprocess, sys, tempfile, threading, time
 from pathlib import Path
 
 HOME = Path.home()
-CONFIG = HOME / ".local/share/cli-proxy-claude/config.yaml"
+CONFIG = Path(os.environ.get("PROXD_CLAUDE_CONFIG") or os.environ.get("CLI_PROXY_CLAUDE_CONFIG")
+              or HOME / ".local/share/proxd/claude/config.yaml")
 CLAUDE = HOME / ".local/bin/claude"
 UNIT = "proxd-claude"
-BEGIN, END = "# BEGIN cli-proxy-claude-ua-sync (managed, do not edit)", "# END cli-proxy-claude-ua-sync"
+BEGIN, END = "# BEGIN proxd-claude-ua-sync (managed, do not edit)", "# END proxd-claude-ua-sync"
+# Any managed block, with the current or the pre-rename markers.
+BLOCK_RE = re.compile(r"# BEGIN (?:proxd|cli-proxy)-claude-ua-sync\b.*?# END (?:proxd|cli-proxy)-claude-ua-sync\n?", re.S)
 BUILTIN_BASELINE = "2.1.280"  # the image's compiled default when no block exists
 OS, ARCH = "MacOS", "arm64"   # keep the image's baseline platform; only the software version moves
 
@@ -57,6 +67,22 @@ def vtuple(v):
     return tuple(int(x) for x in v.split("."))
 
 
+def current_baseline(text):
+    """The Claude Code version in the managed block (either marker name); the image default without one."""
+    block = BLOCK_RE.search(text)
+    cur = re.search(r'user-agent: "claude-cli/(\d+\.\d+\.\d+)', block.group(0)) if block else None
+    return cur.group(1) if cur else BUILTIN_BASELINE
+
+
+def with_block(text, block):
+    """text with the managed block (either marker name) replaced by block where it stands, or block
+    appended when there is none. Any further managed block is dropped, so one block remains."""
+    first = BLOCK_RE.search(text)
+    if not first:
+        return text.rstrip("\n") + "\n" + block
+    return text[:first.start()] + block + BLOCK_RE.sub("", text[first.end():])
+
+
 def main():
     if "--no-update" not in sys.argv:
         r = subprocess.run([str(CLAUDE), "update"], capture_output=True, text=True, timeout=300)
@@ -70,12 +96,9 @@ def main():
     measured = m.group(1)
 
     text = CONFIG.read_text()
-    block_re = re.compile(re.escape(BEGIN) + r".*?" + re.escape(END) + r"\n?", re.S)
-    outside = block_re.sub("", text)
-    if re.search(r"^upstream:", outside, re.M):
+    if re.search(r"^upstream:", BLOCK_RE.sub("", text), re.M):
         sys.exit("config.yaml has its own top-level upstream: key; merge header-defaults by hand")
-    cur = re.search(r'user-agent: "claude-cli/(\d+\.\d+\.\d+)', block_re.search(text).group(0)) if block_re.search(text) else None
-    current = cur.group(1) if cur else BUILTIN_BASELINE
+    current = current_baseline(text)
     if vtuple(measured) <= vtuple(current):
         log(f"up to date: hub baseline {current}, measured {measured}")
         return
@@ -95,7 +118,7 @@ def main():
         '            timeout: "600"',
         END,
     ]) + "\n"
-    new = outside.rstrip("\n") + "\n" + block
+    new = with_block(text, block)
     backup = CONFIG.with_name(f"config.yaml.bak-uasync-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}")
     backup.write_text(text)
     since = time.strftime("%Y-%m-%dT%H:%M:%S")  # podman rejects a space between date and time
